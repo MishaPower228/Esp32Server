@@ -26,9 +26,9 @@
 #define LIGHT_ANALOG_PIN 35
 
 // === LCD (I2C) ===
-#define LCD_ADDRESS 0x27
-#define LCD_WIDTH   20
-#define LCD_HEIGHT  4
+#define LCD_ADDRESS 0x3f
+#define LCD_WIDTH   16
+#define LCD_HEIGHT  2
 LiquidCrystal_I2C lcd(LCD_ADDRESS, LCD_WIDTH, LCD_HEIGHT);
 
 #define SEALEVELPRESSURE_HPA (1013.25)
@@ -40,6 +40,7 @@ bool statusDisplayed = true;
 String uniqueId;
 String savedSSID = "";
 String savedPass = "";
+String bleName;
 bool bleConfigured = false;
 
 // === AES ===
@@ -82,28 +83,25 @@ class MyCallbacks : public BLECharacteristicCallbacks {
 
     String username = (const char*)data["username"];
     String imageName = (const char*)data["imageName"];
-    int roomId = int(data["roomId"]);
     String ssid = (const char*)data["ssid"];
     String encryptedPassword = (const char*)data["password"];
     String roomName = (const char*)data["roomName"];
 
     preferences.begin("config", false);
-    preferences.putInt("RoomId", roomId);
     preferences.putString("ssid", ssid);
     preferences.putString("enc_pwd", encryptedPassword);
     preferences.putString("username", username);
     preferences.putString("imageName", imageName);
-    preferences.putString("RoomName", roomName);
+    preferences.putString("roomName", roomName);
     preferences.putBool("configured", true);
     //preferences.end();
 
     Serial.println("=== PREF CHECK ===");
-    Serial.println("RoomId: " + String(preferences.getInt("RoomId", -1)));
     Serial.println("ssid: " + preferences.getString("ssid", "none"));
     Serial.println("enc_pwd: " + preferences.getString("enc_pwd", "none"));
     Serial.println("username: " + preferences.getString("username", "none"));
     Serial.println("imageName: " + preferences.getString("imageName", "none"));
-    Serial.println("RoomName: " + preferences.getString("RoomName", "none"));
+    Serial.println("roomName: " + preferences.getString("roomName", "none"));
     Serial.println("configured: " + String(preferences.getBool("configured", false)));
     Serial.println("===================");
     preferences.end();
@@ -184,46 +182,69 @@ void updateDisplay(float tempC, float humi, int smokeState, int lightState, floa
   lcd.print(" Light:"); lcd.print(lightState == HIGH ? "Dark" : "Light");
 
   lcd.setCursor(0, 3);
-  String roomName = preferences.getString("RoomName", "NoRoom");
+  String roomName = preferences.getString("roomName", "NoRoom");
   lcd.print(roomName.substring(0, 20));
 }
 void setup() {
   Serial.begin(115200);
-  preferences.begin("config", false);
-  bleConfigured = preferences.getBool("configured", false);
-  preferences.end();
 
+  // === Ідентифікатор та BLE-ім’я ===
   uint64_t chipid = ESP.getEfuseMac();
   char id[13];
   sprintf(id, "%04X%08X", (uint32_t)(chipid >> 32), (uint32_t)chipid);
   uniqueId = String(id);
+  String shortId = uniqueId.substring(uniqueId.length() - 6);
+  bleName = "ESP32_" + shortId;
 
-  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
-  lcd.init();
-  lcd.backlight();
-  lcd.setCursor(0, 0);
-  if (!bleConfigured) {
-    lcd.print("BLE config mode");
-  } else {
-    lcd.print("Init sensors...");
-  }
+  // === Ініціалізація BLE ===
+  BLEDevice::init(bleName.c_str());
+  Serial.println("=== BLE ІНІЦІАЛІЗАЦІЯ ===");
+  Serial.println("ChipId: " + uniqueId);
+  Serial.println("BLE Name: " + bleName);
 
-  dht.begin();
-  pinMode(Smoke_PIN, INPUT); pinMode(Light_PIN, INPUT);
-  delay(2000);
-  if (!bme.begin(0x76)) while (1);
-
-  if (bleConfigured) scanAndConnectWiFi();
-
-  BLEDevice::init("ESP32_SENSOR");
   BLEServer *pServer = BLEDevice::createServer();
   BLEService *pService = pServer->createService(SERVICE_UUID);
   pCharacteristic = pService->createCharacteristic(CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE);
   pCharacteristic->setCallbacks(new MyCallbacks());
   pService->start();
+
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
-  pAdvertising->start();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->setScanResponse(true);
+  pAdvertising->setMinPreferred(0x06);  // необов’язково, але допомагає
+
+  BLEDevice::startAdvertising();
+  Serial.println("BLE advertising started!");
+  Serial.println("==========================");
+
+  // === Preferences ===
+  preferences.begin("config", false);
+  bleConfigured = preferences.getBool("configured", false);
+  preferences.end();
+
+  // === Дисплей, сенсори ===
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print(bleConfigured ? "Init sensors..." : "BLE config mode");
+
+  dht.begin();
+  pinMode(Smoke_PIN, INPUT);
+  pinMode(Light_PIN, INPUT);
+  delay(2000);
+
+  if (!bme.begin(0x76)) {
+    Serial.println("Помилка BME280");
+    while (1);
+  }
+
+  // === Wi-Fi ===
+  if (bleConfigured) {
+    scanAndConnectWiFi();
+  }
 }
+
 
 void checkWiFiConnection() {
   wl_status_t currentStatus = WiFi.status();
@@ -238,8 +259,6 @@ void checkWiFiConnection() {
 
 void loop() {
 
-  Serial.println("WiFi SSID: " + savedSSID);
-  Serial.println("WiFi PASS: " + String(savedPass.length(), '*'));
   checkWiFiConnection();
 
   if (millis() - displayRefreshTime >= displayRefreshInterval) {
@@ -267,16 +286,16 @@ void loop() {
     float lightPercent = 100 - (lightAnalogValue * 100.0 / 4095.0);
 
     preferences.begin("config", false);
-    int RoomId = preferences.getInt("RoomId", 0);
     String username = preferences.getString("username", "");
     String imageName = preferences.getString("imageName", "");
+    String roomName = preferences.getString("roomName", "");
     preferences.end();
 
     JSONVar payload;
     payload["Username"] = username;
     payload["ChipId"] = uniqueId;
     payload["ImageName"] = imageName;
-    payload["RoomId"] = RoomId;
+    payload["roomName"] = roomName;
     payload["TemperatureDht"] = tempC;
     payload["HumidityDht"] = humi;
     payload["TemperatureBme"] = bmeTemp;
