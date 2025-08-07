@@ -42,6 +42,7 @@ String savedSSID = "";
 String savedPass = "";
 String bleName;
 bool bleConfigured = false;
+bool bmpDetected = true;
 
 // === AES ===
 AESLib aesLib;
@@ -172,10 +173,18 @@ void updateDisplay(float tempC, float humi, int smokeState, int lightState, floa
   }
 
   lcd.setCursor(0, 0);
-  lcd.print("T:"); lcd.print(tempC); lcd.print("C H:"); lcd.print(humi); lcd.print("%");
+  if (isnan(tempC) || isnan(humi)) {
+    lcd.print("Temp/Hum: ERROR");
+  } else {
+    lcd.print("T:"); lcd.print(tempC); lcd.print(" H:"); lcd.print(humi);
+  }
 
   lcd.setCursor(0, 1);
-  lcd.print("P:"); lcd.print(bmePressure); lcd.print("hPa");
+  if (!bmpDetected || isnan(bmePressure)) {
+    lcd.print("Pres: ERROR");
+  } else {
+    lcd.print("P:"); lcd.print(bmePressure); lcd.print("hPa");
+  }
 
   lcd.setCursor(0, 2);
   lcd.print("Gas:"); lcd.print(smokeState == LOW ? "Yes" : "No");
@@ -185,6 +194,7 @@ void updateDisplay(float tempC, float humi, int smokeState, int lightState, floa
   String roomName = preferences.getString("roomName", "NoRoom");
   lcd.print(roomName.substring(0, 20));
 }
+
 void setup() {
   Serial.begin(115200);
 
@@ -234,9 +244,9 @@ void setup() {
   pinMode(Light_PIN, INPUT);
   delay(2000);
 
-  if (!bme.begin(0x76)) {
+  if (!bmp.begin(0x76)) {
     Serial.println("Помилка BME280");
-    while (1);
+    bmpDetected = false;
   }
 
   // === Wi-Fi ===
@@ -296,12 +306,12 @@ void loop() {
     payload["ChipId"] = uniqueId;
     payload["ImageName"] = imageName;
     payload["roomName"] = roomName;
-    payload["TemperatureDht"] = tempC;
-    payload["HumidityDht"] = humi;
-    payload["TemperatureBme"] = bmeTemp;
-    payload["HumidityBme"] = bmeHumi;
-    payload["Pressure"] = bmePressure;
-    payload["Altitude"] = bmeAltitude;
+    payload["TemperatureDht"] = isnan(tempC) ? JSON::null : tempC;
+    payload["HumidityDht"] = isnan(humi) ? JSON::null : humi;
+    payload["TemperatureBme"] = (bmpDetected && !isnan(bmeTemp)) ? bmeTemp : JSON::null;
+    payload["HumidityBme"] = (bmpDetected && !isnan(bmeHumi)) ? bmeTemp : JSON::null;
+    payload["Pressure"] = (bmpDetected && !isnan(bmePressure)) ? bmePressure : JSON::null;
+    payload["Altitude"] = (bmpDetected && !isnan(bmeAltitude)) ? bmeAltitude : JSON::null;
     payload["GasDetected"] = (smokeState == LOW ? "yes" : "no");
     payload["Light"] = (lightState == HIGH ? "dark" : "light");
     payload["MQ2Analog"] = mq2AnalogValue;
