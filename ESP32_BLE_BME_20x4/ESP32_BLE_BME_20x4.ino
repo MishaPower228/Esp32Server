@@ -26,9 +26,9 @@
 #define LIGHT_ANALOG_PIN 35
 
 // === LCD (I2C) ===
-#define LCD_ADDRESS 0x3f
-#define LCD_WIDTH   16
-#define LCD_HEIGHT  2
+#define LCD_ADDRESS 0x27
+#define LCD_WIDTH   20
+#define LCD_HEIGHT  4
 LiquidCrystal_I2C lcd(LCD_ADDRESS, LCD_WIDTH, LCD_HEIGHT);
 
 #define SEALEVELPRESSURE_HPA (1013.25)
