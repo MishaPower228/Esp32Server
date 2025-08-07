@@ -34,7 +34,7 @@ LiquidCrystal_I2C lcd(LCD_ADDRESS, LCD_WIDTH, LCD_HEIGHT);
 Adafruit_BMP280 bmp;
 DHT dht(DHT_PIN, DHT11);
 
-const char* serverName = "http://192.168.249.32:5210/api/sensordata";
+const char* serverName = "http://192.168.140.32:5210/api/sensordata";
 bool statusDisplayed = true;
 String uniqueId;
 String savedSSID = "";
@@ -336,63 +336,77 @@ void loop() {
     String roomName = preferences.getString("roomName", "");
     preferences.end();
 
-    JSONVar payload;
-    payload["Username"] = username;
-    payload["ChipId"] = uniqueId;
-    payload["ImageName"] = imageName;
-    payload["roomName"] = roomName;
-    // Температура DHT
-    if (isnan(tempC)) {
-      payload["TemperatureDht"] = nullptr;
-    } else {
-      payload["TemperatureDht"] = tempC;
-    }
+    String json = "{";
 
-    // Вологість DHT
-    if (isnan(humi)) {
-      payload["HumidityDht"] = nullptr;
-    } else {
-      payload["HumidityDht"] = humi;
-    }
+    json += "\"Username\":\"" + String(username) + "\",";
+    json += "\"ChipId\":" + String(uniqueId) + ",";
+    json += "\"ImageName\":\"" + String(imageName) + "\",";
+    json += "\"RoomName\":\"" + String(roomName) + "\",";
 
-    // Температура BMP
-    if (bmpDetected && !isnan(bmeTemp)) {
-      payload["TemperatureBme"] = bmeTemp;
-    } else {
-      payload["TemperatureBme"] = nullptr;
-    }
+    // TemperatureDht
+    json += "\"TemperatureDht\":";
+    json += isnan(tempC) ? "null" : String(tempC, 2);
+    json += ",";
 
-    // Вологість BMP (завжди null)
-    payload["HumidityBme"] = nullptr;
+    // HumidityDht
+    json += "\"HumidityDht\":";
+    json += isnan(humi) ? "null" : String(humi, 2);
+    json += ",";
 
-    // Тиск BMP
-    if (bmpDetected && !isnan(bmePressure)) {
-      payload["Pressure"] = bmePressure;
-    } else {
-      payload["Pressure"] = nullptr;
-    }
+    // TemperatureBme
+    json += "\"TemperatureBme\":";
+    json += (bmpDetected && !isnan(bmeTemp)) ? String(bmeTemp, 2) : "null";
+    json += ",";
 
-    // Висота BMP
-    if (bmpDetected && !isnan(bmeAltitude)) {
-      payload["Altitude"] = bmeAltitude;
-    } else {
-      payload["Altitude"] = nullptr;
-    }
-    payload["GasDetected"] = (smokeState == LOW ? "yes" : "no");
-    payload["Light"] = (lightState == HIGH ? "dark" : "light");
-    payload["MQ2Analog"] = mq2AnalogValue;
-    payload["MQ2AnalogPercent"] = mq2Percent;
-    payload["LightAnalog"] = lightAnalogValue;
-    payload["LightAnalogPercent"] = lightPercent;
+    // HumidityBme — завжди null
+    json += "\"HumidityBme\":null,";
 
-    String json = JSON.stringify(payload);
+    // Pressure
+    json += "\"Pressure\":";
+    json += (bmpDetected && !isnan(bmePressure)) ? String(bmePressure, 2) : "null";
+    json += ",";
+
+    // Altitude
+    json += "\"Altitude\":";
+    json += (bmpDetected && !isnan(bmeAltitude)) ? String(bmeAltitude, 2) : "null";
+    json += ",";
+
+    // GasDetected
+    json += "\"GasDetected\":\"";
+    json += (smokeState == LOW) ? "yes" : "no";
+    json += "\",";
+
+    // Light
+    json += "\"Light\":\"";
+    json += (lightState == HIGH) ? "dark" : "light";
+    json += "\",";
+
+    // MQ2Analog
+    json += "\"MQ2Analog\":" + String(mq2AnalogValue, 2) + ",";
+
+    // MQ2AnalogPercent
+    json += "\"MQ2AnalogPercent\":" + String(mq2Percent, 2) + ",";
+
+    // LightAnalog
+    json += "\"LightAnalog\":" + String(lightAnalogValue, 2) + ",";
+
+    // LightAnalogPercent
+    json += "\"LightAnalogPercent\":" + String(lightPercent, 2);
+
+    // кінець JSON
+    json += "}";
+
+    // 🔹 Відправлення
     HTTPClient http;
     http.begin(serverName);
     http.addHeader("Content-Type", "application/json");
     int code = http.POST(json);
+
     if (code > 0) Serial.println("POST OK: " + String(code));
     else Serial.println("POST ERR: " + String(code));
+
     http.end();
     lastTime = millis();
+
   }
 }
