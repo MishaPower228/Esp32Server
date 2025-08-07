@@ -227,8 +227,10 @@ void updateDisplay(float tempC, float humi, int smokeState, int lightState, floa
   lcd.print(" Light:"); lcd.print(lightState == HIGH ? "Dark" : "Light");
 
   lcd.setCursor(0, 3);
+  preferences.begin("config", true); // true — лише читання
   String roomName = preferences.getString("roomName", "NoRoom");
   lcd.print(roomName.substring(0, 20));
+  preferences.end();
 }
 
 void setup() {
@@ -339,10 +341,10 @@ void loop() {
 
     String json = "{";
 
-    json += "\"Username\":\"" + String(username) + "\",";
-    json += "\"ChipId\":" + String(uniqueId) + ",";
-    json += "\"ImageName\":\"" + String(imageName) + "\",";
-    json += "\"RoomName\":\"" + String(roomName) + "\",";
+    json += "\"Username\":\"" + String(username) + "\",";                   // ✔ Username
+    json += "\"ChipId\":\"" + String(uniqueId) + "\",";                    // ❗ Була помилка: передавався як число — зроби строку
+    json += "\"ImageName\":\"" + String(imageName) + "\",";               // ✔ ImageName
+    json += "\"RoomName\":\"" + String(roomName) + "\",";                 // ✔ RoomName
 
     // TemperatureDht
     json += "\"TemperatureDht\":";
@@ -359,11 +361,11 @@ void loop() {
     json += (bmpDetected && !isnan(bmeTemp)) ? String(bmeTemp, 2) : "null";
     json += ",";
 
-    // HumidityBme — завжди null
+    // HumidityBme
     json += "\"HumidityBme\":";
     json += (bmpDetected && !isnan(bmeHumi)) ? String(bmeHumi, 2) : "null";
     json += ",";
-    
+
     // Pressure
     json += "\"Pressure\":";
     json += (bmpDetected && !isnan(bmePressure)) ? String(bmePressure, 2) : "null";
@@ -396,8 +398,9 @@ void loop() {
     // LightAnalogPercent
     json += "\"LightAnalogPercent\":" + String(lightPercent, 2);
 
-    // кінець JSON
+    // Кінець
     json += "}";
+
 
     // 🔹 Відправлення
     HTTPClient http;
