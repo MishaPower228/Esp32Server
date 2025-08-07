@@ -7,8 +7,8 @@
 #include <HTTPClient.h>
 #include <Arduino_JSON.h>
 #include <SPI.h>
-#include <Adafruit_Sensor.h>
 #include <Adafruit_BME280.h>
+#include <Adafruit_Sensor.h>
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
 #include <BLEDevice.h>
@@ -35,7 +35,7 @@ LiquidCrystal_I2C lcd(LCD_ADDRESS, LCD_WIDTH, LCD_HEIGHT);
 Adafruit_BME280 bme;
 DHT dht(DHT_PIN, DHT11);
 
-const char* serverName = "http://192.168.249.32:5210/api/sensordata";
+const char* serverName = "http://192.168.0.200:5210/api/sensordata";
 bool statusDisplayed = true;
 String uniqueId;
 String savedSSID = "";
@@ -44,19 +44,41 @@ String bleName;
 bool bleConfigured = false;
 bool bmpDetected = true;
 
-// === AES ===
 AESLib aesLib;
-byte aes_key[] = { 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16 };
-byte aes_iv[]  = { 1,2,3,4,5,6,7,8,1,2,3,4,5,6,7,8 };
+
+// === AES ===
+// AES ключ — такий самий, як у Android ("my-secret-key-12")
+byte aes_key[] = {
+  'm', 'y', '-', 's', 'e', 'c', 'r', 'e',
+  't', '-', 'k', 'e', 'y', '-', '1', '2'
+};
+
+// IV не використовується для ECB, але AESLib вимагає його передати
+byte aes_iv[] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 
 String decryptPassword(String encrypted) {
   int inputLength = encrypted.length() + 1;
   char input[inputLength];
   encrypted.toCharArray(input, inputLength);
-  byte output[128];
-  int len = aesLib.decrypt64(input, inputLength, output, aes_key, 128, aes_iv);
-  output[len] = '\0';
-  return String((char*)output);
+
+  byte decrypted[128];  // буфер для розшифрованих даних
+  int len = aesLib.decrypt64(input, inputLength, decrypted, aes_key, 128, aes_iv);
+
+  if (len <= 0) {
+    Serial.println("❌ Помилка дешифрування!");
+    return "";
+  }
+
+  decrypted[len] = '\0';
+  String result = String((char*)decrypted);
+
+  // Видаляємо PKCS7 паддінг
+  int pad = decrypted[len - 1];  // останній байт — кількість байтів паддінгу
+  if (pad > 0 && pad <= 16) {
+    result.remove(result.length() - pad);
+  }
+
+  return result;
 }
 
 // === BLE ===
@@ -68,20 +90,26 @@ BLECharacteristic *pCharacteristic;
 class MyCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *pCharacteristic) {
     String jsonStr = String(pCharacteristic->getValue().c_str());
+    Serial.println("Отримано BLE JSON:");
+    Serial.println(jsonStr);
+
     JSONVar data = JSON.parse(jsonStr);
-  // ✅ Обробка reset-команди
-  if (data.hasOwnProperty("reset") && (bool)data["reset"] == true) {
-    preferences.begin("config", false);
-    preferences.clear();
-    preferences.end();
-    Serial.println("Preferences очищено. Перезапуск...");
-    delay(500);
-    ESP.restart();
-    return;
-  }
+    if (JSON.typeof(data) == "undefined") {
+      Serial.println("JSON невірний");
+      return;
+    }
 
-    if (JSON.typeof(data) == "undefined") return;
+    // 🔄 RESET
+    bool shouldReset = data.hasOwnProperty("reset") && (bool)data["reset"];
+    if (shouldReset) {
+      Serial.println("🔄 Очищення Preferences через reset=true");
+      preferences.begin("config", false);
+      preferences.clear();
+      preferences.end();
+      delay(100); // коротка затримка для стабільності
+    }
 
+    // ✅ Збереження нових параметрів
     String username = (const char*)data["username"];
     String imageName = (const char*)data["imageName"];
     String ssid = (const char*)data["ssid"];
@@ -95,25 +123,23 @@ class MyCallbacks : public BLECharacteristicCallbacks {
     preferences.putString("imageName", imageName);
     preferences.putString("roomName", roomName);
     preferences.putBool("configured", true);
-    //preferences.end();
 
+    // 🔎 Дебаг
     Serial.println("=== PREF CHECK ===");
-    Serial.println("ssid: " + preferences.getString("ssid", "none"));
-    Serial.println("enc_pwd: " + preferences.getString("enc_pwd", "none"));
-    Serial.println("username: " + preferences.getString("username", "none"));
-    Serial.println("imageName: " + preferences.getString("imageName", "none"));
-    Serial.println("roomName: " + preferences.getString("roomName", "none"));
-    Serial.println("configured: " + String(preferences.getBool("configured", false)));
+    Serial.println("ssid: " + ssid);
+    Serial.println("enc_pwd: " + encryptedPassword);
+    Serial.println("username: " + username);
+    Serial.println("imageName: " + imageName);
+    Serial.println("roomName: " + roomName);
+    Serial.println("reset: " + String(shouldReset));
     Serial.println("===================");
     preferences.end();
 
     bleConfigured = true;
-    Serial.println("BLE збережено!");
-    Serial.println("=== BLE Data ===");
-    Serial.println(jsonStr);
-    Serial.println("================");
+    Serial.println("✅ Конфігурація збережена!");
   }
 };
+
 
 // === Таймер ===
 unsigned long lastTime = 0, displayRefreshTime = 0, wifiCheckTime = 0;
@@ -130,7 +156,17 @@ void scanAndConnectWiFi() {
 
   preferences.begin("config", false);
   savedSSID = preferences.getString("ssid", "");
-  savedPass = decryptPassword(preferences.getString("enc_pwd", ""));
+  String encrypted = preferences.getString("enc_pwd", "");
+  savedPass = decryptPassword(encrypted);
+  preferences.end();
+
+  Serial.println("🔐 Зашифрований пароль: " + encrypted);
+  Serial.println("🔓 Дешифровано пароль: " + savedPass);
+
+  if (savedSSID == "" || savedPass == "") {
+    Serial.println("❌ Немає збереженого SSID або пароля. Пропуск Wi-Fi підключення.");
+    return;
+  }
   preferences.end();
 
   for (int i = 0; i < n; ++i) {
@@ -244,7 +280,7 @@ void setup() {
   pinMode(Light_PIN, INPUT);
   delay(2000);
 
-  if (!bmp.begin(0x76)) {
+  if (!bme.begin(0x76)) {
     Serial.println("Помилка BME280");
     bmpDetected = false;
   }
@@ -301,32 +337,79 @@ void loop() {
     String roomName = preferences.getString("roomName", "");
     preferences.end();
 
-    JSONVar payload;
-    payload["Username"] = username;
-    payload["ChipId"] = uniqueId;
-    payload["ImageName"] = imageName;
-    payload["roomName"] = roomName;
-    payload["TemperatureDht"] = isnan(tempC) ? JSON::null : tempC;
-    payload["HumidityDht"] = isnan(humi) ? JSON::null : humi;
-    payload["TemperatureBme"] = (bmpDetected && !isnan(bmeTemp)) ? bmeTemp : JSON::null;
-    payload["HumidityBme"] = (bmpDetected && !isnan(bmeHumi)) ? bmeTemp : JSON::null;
-    payload["Pressure"] = (bmpDetected && !isnan(bmePressure)) ? bmePressure : JSON::null;
-    payload["Altitude"] = (bmpDetected && !isnan(bmeAltitude)) ? bmeAltitude : JSON::null;
-    payload["GasDetected"] = (smokeState == LOW ? "yes" : "no");
-    payload["Light"] = (lightState == HIGH ? "dark" : "light");
-    payload["MQ2Analog"] = mq2AnalogValue;
-    payload["MQ2AnalogPercent"] = mq2Percent;
-    payload["LightAnalog"] = lightAnalogValue;
-    payload["LightAnalogPercent"] = lightPercent;
+    String json = "{";
 
-    String json = JSON.stringify(payload);
+    json += "\"Username\":\"" + String(username) + "\",";
+    json += "\"ChipId\":" + String(uniqueId) + ",";
+    json += "\"ImageName\":\"" + String(imageName) + "\",";
+    json += "\"RoomName\":\"" + String(roomName) + "\",";
+
+    // TemperatureDht
+    json += "\"TemperatureDht\":";
+    json += isnan(tempC) ? "null" : String(tempC, 2);
+    json += ",";
+
+    // HumidityDht
+    json += "\"HumidityDht\":";
+    json += isnan(humi) ? "null" : String(humi, 2);
+    json += ",";
+
+    // TemperatureBme
+    json += "\"TemperatureBme\":";
+    json += (bmpDetected && !isnan(bmeTemp)) ? String(bmeTemp, 2) : "null";
+    json += ",";
+
+    // HumidityBme — завжди null
+    json += "\"HumidityBme\":";
+    json += (bmpDetected && !isnan(bmeHumi)) ? String(bmeHumi, 2) : "null";
+    json += ",";
+    
+    // Pressure
+    json += "\"Pressure\":";
+    json += (bmpDetected && !isnan(bmePressure)) ? String(bmePressure, 2) : "null";
+    json += ",";
+
+    // Altitude
+    json += "\"Altitude\":";
+    json += (bmpDetected && !isnan(bmeAltitude)) ? String(bmeAltitude, 2) : "null";
+    json += ",";
+
+    // GasDetected
+    json += "\"GasDetected\":\"";
+    json += (smokeState == LOW) ? "yes" : "no";
+    json += "\",";
+
+    // Light
+    json += "\"Light\":\"";
+    json += (lightState == HIGH) ? "dark" : "light";
+    json += "\",";
+
+    // MQ2Analog
+    json += "\"MQ2Analog\":" + String(mq2AnalogValue, 2) + ",";
+
+    // MQ2AnalogPercent
+    json += "\"MQ2AnalogPercent\":" + String(mq2Percent, 2) + ",";
+
+    // LightAnalog
+    json += "\"LightAnalog\":" + String(lightAnalogValue, 2) + ",";
+
+    // LightAnalogPercent
+    json += "\"LightAnalogPercent\":" + String(lightPercent, 2);
+
+    // кінець JSON
+    json += "}";
+
+    // 🔹 Відправлення
     HTTPClient http;
     http.begin(serverName);
     http.addHeader("Content-Type", "application/json");
     int code = http.POST(json);
+
     if (code > 0) Serial.println("POST OK: " + String(code));
     else Serial.println("POST ERR: " + String(code));
+
     http.end();
     lastTime = millis();
+
   }
 }
