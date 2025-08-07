@@ -143,7 +143,7 @@ class MyCallbacks : public BLECharacteristicCallbacks {
 
 // === Таймер ===
 unsigned long lastTime = 0, displayRefreshTime = 0, wifiCheckTime = 0;
-const long timerDelay = 10000, displayRefreshInterval = 10000, wifiCheckInterval = 60000;
+const long timerDelay = 600000, displayRefreshInterval = 10000, wifiCheckInterval = 60000;
 wl_status_t lastWiFiStatus = WL_IDLE_STATUS;
 
 void scanAndConnectWiFi() {
@@ -212,7 +212,15 @@ void updateDisplay(float tempC, float humi, int smokeState, int lightState, floa
   if (isnan(tempC) || isnan(humi)) {
     lcd.print("Temp/Hum: ERROR");
   } else {
-    lcd.print("T:"); lcd.print(tempC); lcd.print(" H:"); lcd.print(humi);
+    lcd.print("Temp:");
+    lcd.print((int)tempC);
+    lcd.print((char)223);  // символ ° (код 223 у LCD-символах)
+    lcd.print("C ");
+
+    lcd.print("Hum:");
+    lcd.print((int)humi);
+    lcd.print("%");
+
   }
 
   lcd.setCursor(0, 1);
@@ -274,8 +282,31 @@ void setup() {
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   lcd.init();
   lcd.backlight();
+
+  // Рядок 1 — ініціалізація
   lcd.setCursor(0, 0);
-  lcd.print(bleConfigured ? "Init sensors..." : "BLE config mode");
+  lcd.print("Init sensors...");
+
+  // Рядок 4 — Hello, username
+  preferences.begin("config", true);
+  String username = preferences.getString("username", "");
+  preferences.end();
+
+  lcd.setCursor(0, 3);
+  if (username.length() > 0) {
+  String helloLine = "Hello, " + username;
+
+    if (helloLine.length() <= 20) {
+      lcd.print(helloLine); // без прокрутки
+    } else {
+      // з прокруткою
+      for (int i = 0; i < helloLine.length() - 19; i++) {
+        lcd.setCursor(0, 3);
+        lcd.print(helloLine.substring(i, i + 20));
+        delay(300);
+      }
+    }
+  }
 
   dht.begin();
   pinMode(Smoke_PIN, INPUT);
@@ -341,10 +372,10 @@ void loop() {
 
     String json = "{";
 
-    json += "\"Username\":\"" + String(username) + "\",";                   // ✔ Username
-    json += "\"ChipId\":\"" + String(uniqueId) + "\",";                    // ❗ Була помилка: передавався як число — зроби строку
-    json += "\"ImageName\":\"" + String(imageName) + "\",";               // ✔ ImageName
-    json += "\"RoomName\":\"" + String(roomName) + "\",";                 // ✔ RoomName
+    json += "\"Username\":\"" + String(username) + "\",";                   
+    json += "\"ChipId\":\"" + String(uniqueId) + "\",";                     
+    json += "\"ImageName\":\"" + String(imageName) + "\",";               
+    json += "\"RoomName\":\"" + String(roomName) + "\",";                 
 
     // TemperatureDht
     json += "\"TemperatureDht\":";
@@ -406,6 +437,11 @@ void loop() {
     HTTPClient http;
     http.begin(serverName);
     http.addHeader("Content-Type", "application/json");
+
+    // 🔍 Показ JSON у Serial Monitor
+    Serial.println("➡️ Надсилається JSON:");
+    Serial.println(json);
+
     int code = http.POST(json);
 
     if (code > 0) Serial.println("POST OK: " + String(code));
