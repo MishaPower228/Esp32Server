@@ -43,19 +43,41 @@ String bleName;
 bool bleConfigured = false;
 bool bmpDetected = true;
 
-// === AES ===
 AESLib aesLib;
-byte aes_key[] = { 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16 };
-byte aes_iv[]  = { 1,2,3,4,5,6,7,8,1,2,3,4,5,6,7,8 };
+
+// === AES ===
+// AES ключ — такий самий, як у Android ("my-secret-key-12")
+byte aes_key[] = {
+  'm', 'y', '-', 's', 'e', 'c', 'r', 'e',
+  't', '-', 'k', 'e', 'y', '-', '1', '2'
+};
+
+// IV не використовується для ECB, але AESLib вимагає його передати
+byte aes_iv[] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 
 String decryptPassword(String encrypted) {
   int inputLength = encrypted.length() + 1;
   char input[inputLength];
   encrypted.toCharArray(input, inputLength);
-  byte output[128];
-  int len = aesLib.decrypt64(input, inputLength, output, aes_key, 128, aes_iv);
-  output[len] = '\0';
-  return String((char*)output);
+
+  byte decrypted[128];  // буфер для розшифрованих даних
+  int len = aesLib.decrypt64(input, inputLength, decrypted, aes_key, 128, aes_iv);
+
+  if (len <= 0) {
+    Serial.println("❌ Помилка дешифрування!");
+    return "";
+  }
+
+  decrypted[len] = '\0';
+  String result = String((char*)decrypted);
+
+  // Видаляємо PKCS7 паддінг
+  int pad = decrypted[len - 1];  // останній байт — кількість байтів паддінгу
+  if (pad > 0 && pad <= 16) {
+    result.remove(result.length() - pad);
+  }
+
+  return result;
 }
 
 // === BLE ===
@@ -67,20 +89,26 @@ BLECharacteristic *pCharacteristic;
 class MyCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *pCharacteristic) {
     String jsonStr = String(pCharacteristic->getValue().c_str());
+    Serial.println("Отримано BLE JSON:");
+    Serial.println(jsonStr);
+
     JSONVar data = JSON.parse(jsonStr);
-  // ✅ Обробка reset-команди
-  if (data.hasOwnProperty("reset") && (bool)data["reset"] == true) {
-    preferences.begin("config", false);
-    preferences.clear();
-    preferences.end();
-    Serial.println("Preferences очищено. Перезапуск...");
-    delay(500);
-    ESP.restart();
-    return;
-  }
+    if (JSON.typeof(data) == "undefined") {
+      Serial.println("JSON невірний");
+      return;
+    }
 
-    if (JSON.typeof(data) == "undefined") return;
+    // 🔄 RESET
+    bool shouldReset = data.hasOwnProperty("reset") && (bool)data["reset"];
+    if (shouldReset) {
+      Serial.println("🔄 Очищення Preferences через reset=true");
+      preferences.begin("config", false);
+      preferences.clear();
+      preferences.end();
+      delay(100); // коротка затримка для стабільності
+    }
 
+    // ✅ Збереження нових параметрів
     String username = (const char*)data["username"];
     String imageName = (const char*)data["imageName"];
     String ssid = (const char*)data["ssid"];
@@ -94,25 +122,23 @@ class MyCallbacks : public BLECharacteristicCallbacks {
     preferences.putString("imageName", imageName);
     preferences.putString("roomName", roomName);
     preferences.putBool("configured", true);
-    //preferences.end();
 
+    // 🔎 Дебаг
     Serial.println("=== PREF CHECK ===");
-    Serial.println("ssid: " + preferences.getString("ssid", "none"));
-    Serial.println("enc_pwd: " + preferences.getString("enc_pwd", "none"));
-    Serial.println("username: " + preferences.getString("username", "none"));
-    Serial.println("imageName: " + preferences.getString("imageName", "none"));
-    Serial.println("roomName: " + preferences.getString("roomName", "none"));
-    Serial.println("configured: " + String(preferences.getBool("configured", false)));
+    Serial.println("ssid: " + ssid);
+    Serial.println("enc_pwd: " + encryptedPassword);
+    Serial.println("username: " + username);
+    Serial.println("imageName: " + imageName);
+    Serial.println("roomName: " + roomName);
+    Serial.println("reset: " + String(shouldReset));
     Serial.println("===================");
     preferences.end();
 
     bleConfigured = true;
-    Serial.println("BLE збережено!");
-    Serial.println("=== BLE Data ===");
-    Serial.println(jsonStr);
-    Serial.println("================");
+    Serial.println("✅ Конфігурація збережена!");
   }
 };
+
 
 // === Таймер ===
 unsigned long lastTime = 0, displayRefreshTime = 0, wifiCheckTime = 0;
@@ -129,7 +155,17 @@ void scanAndConnectWiFi() {
 
   preferences.begin("config", false);
   savedSSID = preferences.getString("ssid", "");
-  savedPass = decryptPassword(preferences.getString("enc_pwd", ""));
+  String encrypted = preferences.getString("enc_pwd", "");
+  savedPass = decryptPassword(encrypted);
+  preferences.end();
+
+  Serial.println("🔐 Зашифрований пароль: " + encrypted);
+  Serial.println("🔓 Дешифровано пароль: " + savedPass);
+
+  if (savedSSID == "" || savedPass == "") {
+    Serial.println("❌ Немає збереженого SSID або пароля. Пропуск Wi-Fi підключення.");
+    return;
+  }
   preferences.end();
 
   for (int i = 0; i < n; ++i) {
@@ -305,12 +341,43 @@ void loop() {
     payload["ChipId"] = uniqueId;
     payload["ImageName"] = imageName;
     payload["roomName"] = roomName;
-    payload["TemperatureDht"] = isnan(tempC) ? JSON::null : tempC;
-    payload["HumidityDht"] = isnan(humi) ? JSON::null : humi;
-    payload["TemperatureBme"] = (bmpDetected && !isnan(bmeTemp)) ? bmeTemp : JSON::null;
-    payload["HumidityBme"] = JSON::null;
-    payload["Pressure"] = (bmpDetected && !isnan(bmePressure)) ? bmePressure : JSON::null;
-    payload["Altitude"] = (bmpDetected && !isnan(bmeAltitude)) ? bmeAltitude : JSON::null;
+    // Температура DHT
+    if (isnan(tempC)) {
+      payload["TemperatureDht"] = nullptr;
+    } else {
+      payload["TemperatureDht"] = tempC;
+    }
+
+    // Вологість DHT
+    if (isnan(humi)) {
+      payload["HumidityDht"] = nullptr;
+    } else {
+      payload["HumidityDht"] = humi;
+    }
+
+    // Температура BMP
+    if (bmpDetected && !isnan(bmeTemp)) {
+      payload["TemperatureBme"] = bmeTemp;
+    } else {
+      payload["TemperatureBme"] = nullptr;
+    }
+
+    // Вологість BMP (завжди null)
+    payload["HumidityBme"] = nullptr;
+
+    // Тиск BMP
+    if (bmpDetected && !isnan(bmePressure)) {
+      payload["Pressure"] = bmePressure;
+    } else {
+      payload["Pressure"] = nullptr;
+    }
+
+    // Висота BMP
+    if (bmpDetected && !isnan(bmeAltitude)) {
+      payload["Altitude"] = bmeAltitude;
+    } else {
+      payload["Altitude"] = nullptr;
+    }
     payload["GasDetected"] = (smokeState == LOW ? "yes" : "no");
     payload["Light"] = (lightState == HIGH ? "dark" : "light");
     payload["MQ2Analog"] = mq2AnalogValue;
