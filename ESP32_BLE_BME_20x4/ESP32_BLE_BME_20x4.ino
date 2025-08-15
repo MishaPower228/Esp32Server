@@ -364,18 +364,9 @@ void loop() {
     float mq2Percent = mq2AnalogValue * 100.0 / 4095.0;
     float lightPercent = 100 - (lightAnalogValue * 100.0 / 4095.0);
 
-    preferences.begin("config", false);
-    String username = preferences.getString("username", "");
-    String imageName = preferences.getString("imageName", "");
-    String roomName = preferences.getString("roomName", "");
-    preferences.end();
-
     String json = "{";
-
-    json += "\"Username\":\"" + String(username) + "\",";                   
-    json += "\"ChipId\":\"" + String(uniqueId) + "\",";                     
-    json += "\"ImageName\":\"" + String(imageName) + "\",";               
-    json += "\"RoomName\":\"" + String(roomName) + "\",";                 
+                   
+    json += "\"ChipId\":\"" + String(uniqueId) + "\",";                                      
 
     // TemperatureDht
     json += "\"TemperatureDht\":";
