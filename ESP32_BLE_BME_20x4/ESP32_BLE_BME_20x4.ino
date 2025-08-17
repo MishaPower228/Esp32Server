@@ -400,12 +400,12 @@ void loop() {
 
     // GasDetected
     json += "\"GasDetected\":\"";
-    json += (smokeState == LOW) ? "yes" : "no";
+    json += (smokeState == HIGH ? "true" : "false");
     json += "\",";
 
     // Light
     json += "\"Light\":\"";
-    json += (lightState == HIGH) ? "dark" : "light";
+    json += (lightState == HIGH ? "true" : "false");
     json += "\",";
 
     // MQ2Analog
