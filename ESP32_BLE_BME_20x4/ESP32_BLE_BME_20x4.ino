@@ -137,6 +137,10 @@ class MyCallbacks : public BLECharacteristicCallbacks {
 
     bleConfigured = true;
     Serial.println("✅ Конфігурація збережена!");
+
+    pCharacteristic->setValue(uniqueId.c_str());
+    pCharacteristic->notify();
+    Serial.println("📤 Надіслано chipId назад: " + uniqueId);
   }
 };
 
@@ -260,7 +264,10 @@ void setup() {
 
   BLEServer *pServer = BLEDevice::createServer();
   BLEService *pService = pServer->createService(SERVICE_UUID);
-  pCharacteristic = pService->createCharacteristic(CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE);
+  pCharacteristic = pService->createCharacteristic(
+    CHARACTERISTIC_UUID,
+    BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY
+  );
   pCharacteristic->setCallbacks(new MyCallbacks());
   pService->start();
 
@@ -398,15 +405,13 @@ void loop() {
     json += (bmpDetected && !isnan(bmeAltitude)) ? String(bmeAltitude, 2) : "null";
     json += ",";
 
-    // GasDetected
-    json += "\"GasDetected\":\"";
+    json += "\"GasDetected\":";
     json += (smokeState == HIGH ? "true" : "false");
-    json += "\",";
-
-    // Light
-    json += "\"Light\":\"";
+    json += ",";
+    
+    json += "\"Light\":";
     json += (lightState == HIGH ? "true" : "false");
-    json += "\",";
+    json += ",";
 
     // MQ2Analog
     json += "\"MQ2Analog\":" + String(mq2AnalogValue, 2) + ",";
