@@ -414,13 +414,13 @@ void loop() {
     json += ",";
 
     // MQ2Analog
-    json += "\"MQ2Analog\":" + String(mq2AnalogValue, 2) + ",";
+    json += "\"MQ2Analog\":" + String(mq2AnalogValue) + ",";
 
     // MQ2AnalogPercent
     json += "\"MQ2AnalogPercent\":" + String(mq2Percent, 2) + ",";
 
     // LightAnalog
-    json += "\"LightAnalog\":" + String(lightAnalogValue, 2) + ",";
+    json += "\"LightAnalog\":" + String(lightAnalogValue) + ",";
 
     // LightAnalogPercent
     json += "\"LightAnalogPercent\":" + String(lightPercent, 2);
