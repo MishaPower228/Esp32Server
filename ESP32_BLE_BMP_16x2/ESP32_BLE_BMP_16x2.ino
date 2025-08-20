@@ -51,7 +51,6 @@ DHT dht(DHT_PIN, DHT11);        // DHT11 (t, h)
 const char* serverName = "http://192.168.92.32:5210/api/sensordata";
 
 // ⭐ БАЗА для GET ownership (захардкожено; без токена)
-static const char* OWNERSHIP_BASE = "http://192.168.92.32:5210/api/sensordata"; // БЕЗ / в кінці
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Глобальні стани/змінні
@@ -262,7 +261,7 @@ int syncOwnershipNoAuth() {
   if (WiFi.status() != WL_CONNECTED) return -1;
 
   // Складання URL: OWNERSHIP_BASE + "/ownership/{chipId}/latest"
-  String url = String(OWNERSHIP_BASE) + "/ownership/" + uniqueId + "/latest";
+  String url = String(serverName) + "/ownership/" + uniqueId + "/latest";
   HTTPClient http;
   http.begin(url);
 
@@ -541,7 +540,7 @@ void loop() {
     json += "\"Pressure\":";        json += (!isnan(bmePressure)) ? String(bmePressure, 2) : "null"; json += ",";
     json += "\"Altitude\":";        json += (!isnan(bmeAltitude)) ? String(bmeAltitude, 2) : "null"; json += ",";
 
-    json += "\"GasDetected\":";     json += (smokeState == HIGH ? "true" : "false"); json += ",";
+    json += "\"GasDetected\":";     json += (smokeState == LOW ? "true" : "false"); json += ",";
     json += "\"Light\":";           json += (lightState == HIGH ? "true" : "false"); json += ",";
 
     json += "\"MQ2Analog\":"           + String(mq2AnalogValue)  + ",";
