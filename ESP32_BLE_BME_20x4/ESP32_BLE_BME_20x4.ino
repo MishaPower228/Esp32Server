@@ -48,11 +48,10 @@ DHT dht(DHT_PIN, DHT11);        // DHT11 (t, h)
 // HTTP сервери/ендпоінти
 // ─────────────────────────────────────────────────────────────────────────────
 // POST телеметрії
-const char* serverName = "http://192.168.0.200:5210/api/sensordata";
+const char* serverName = "http://192.168.92.32:5210/api/sensordata";
 
 // ⭐ БАЗА для GET ownership (без токена);
 //    НЕ додаємо "/" в кінці. URL збиратиметься як OWNERSHIP_BASE + "/ownership/" + chipId + "/latest"
-static const char* OWNERSHIP_BASE = "http://192.168.0.200:5210/api";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Глобальні стани/змінні
@@ -135,7 +134,7 @@ static bool putIfChanged(Preferences& p, const char* key, const String& v) {
 int syncOwnershipNoAuth() {
   if (WiFi.status() != WL_CONNECTED) return -1;
 
-  String url = String(OWNERSHIP_BASE) + "/ownership/" + uniqueId + "/latest";
+  String url = String(serverName) + "/ownership/" + uniqueId + "/latest";
   HTTPClient http;
   http.begin(url);
 
@@ -420,8 +419,7 @@ void setup() {
   char id[13];
   sprintf(id, "%04X%08X", (uint32_t)(chipid >> 32), (uint32_t)chipid);
   uniqueId = String(id);
-  String shortId = uniqueId.substring(uniqueId.length() - 6);
-  bleName = "ESP32_" + shortId;
+  bleName = "ESP32_" + uniqueId;
 
   // BLE init
   BLEDevice::init(bleName.c_str());
