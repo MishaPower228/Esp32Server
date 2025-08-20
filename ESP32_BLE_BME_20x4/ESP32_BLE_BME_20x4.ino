@@ -49,6 +49,7 @@ DHT dht(DHT_PIN, DHT11);        // DHT11 (t, h)
 // ─────────────────────────────────────────────────────────────────────────────
 // POST телеметрії
 const char* serverName = "http://192.168.92.32:5210/api/sensordata";
+const char* apiBase = "http://192.168.92.32:5210/api/sensordata"; 
 
 // ⭐ БАЗА для GET ownership (без токена);
 //    НЕ додаємо "/" в кінці. URL збиратиметься як OWNERSHIP_BASE + "/ownership/" + chipId + "/latest"
@@ -134,7 +135,7 @@ static bool putIfChanged(Preferences& p, const char* key, const String& v) {
 int syncOwnershipNoAuth() {
   if (WiFi.status() != WL_CONNECTED) return -1;
 
-  String url = String(serverName) + "/ownership/" + uniqueId + "/latest";
+  String url = String(apiBase) + "/ownership/" + uniqueId + "/latest";
   HTTPClient http;
   http.begin(url);
 
