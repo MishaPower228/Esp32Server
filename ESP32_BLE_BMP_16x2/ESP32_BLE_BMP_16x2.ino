@@ -430,8 +430,7 @@ void setup() {
   char id[13];
   sprintf(id, "%04X%08X", (uint32_t)(chipid >> 32), (uint32_t)chipid);
   uniqueId = String(id);
-  String shortId = uniqueId.substring(uniqueId.length() - 6);
-  bleName = "ESP32_" + shortId;
+  bleName = "ESP32_" + uniqueId;
 
   // BLE init
   BLEDevice::init(bleName.c_str());
