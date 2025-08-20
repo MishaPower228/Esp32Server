@@ -393,7 +393,7 @@ void updateDisplay(float tempC, float humi, int smokeState, int lightState, floa
 
   // Рядок 3: газ/світло
   lcd.setCursor(0, 2);
-  lcd.print("Gas:"); lcd.print(smokeState == HIGH ? "Yes" : "No ");
+  lcd.print("Gas:"); lcd.print(smokeState == LOW ? "Yes" : "No ");
   lcd.print(" Light:"); lcd.print(lightState == HIGH ? "Dark" : "Light");
 
   // Рядок 4: назва кімнати
