@@ -530,7 +530,7 @@ void loop() {
     json += "\"Pressure\":";        json += (!isnan(bmePressure)) ? String(bmePressure, 2) : "null"; json += ",";
     json += "\"Altitude\":";        json += (!isnan(bmeAltitude)) ? String(bmeAltitude, 2) : "null"; json += ",";
 
-    json += "\"GasDetected\":";     json += (smokeState == HIGH ? "true" : "false"); json += ",";
+    json += "\"GasDetected\":";     json += (smokeState == LOW ? "true" : "false"); json += ",";
     json += "\"Light\":";           json += (lightState == HIGH ? "true" : "false"); json += ",";
 
     json += "\"MQ2Analog\":"           + String(mq2AnalogValue)  + ",";
