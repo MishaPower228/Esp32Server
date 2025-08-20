@@ -49,6 +49,7 @@ DHT dht(DHT_PIN, DHT11);        // DHT11 (t, h)
 // ─────────────────────────────────────────────────────────────────────────────
 // POST телеметрії (як було)
 const char* serverName = "http://192.168.92.32:5210/api/sensordata";
+const char* apiBase = "http://192.168.92.32:5210/api/sensordata"; 
 
 // ⭐ БАЗА для GET ownership (захардкожено; без токена)
 
@@ -261,7 +262,7 @@ int syncOwnershipNoAuth() {
   if (WiFi.status() != WL_CONNECTED) return -1;
 
   // Складання URL: OWNERSHIP_BASE + "/ownership/{chipId}/latest"
-  String url = String(serverName) + "/ownership/" + uniqueId + "/latest";
+  String url = String(apiBase) + "/ownership/" + uniqueId + "/latest";
   HTTPClient http;
   http.begin(url);
 
@@ -402,7 +403,7 @@ void updateDisplay(float tempC, float humi, int smokeState, int lightState, floa
       lcd.print("hPa ");
     }
     lcd.print("G:");
-    lcd.print(smokeState == HIGH ? "Y " : "N ");
+    lcd.print(smokeState == LOW ? "Y " : "N ");
     lcd.print("L:");
     lcd.print(lightState == HIGH ? "D" : "L"); // Dark/Light -> D/L
   } else {
