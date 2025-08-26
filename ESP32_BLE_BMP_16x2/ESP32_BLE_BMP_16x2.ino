@@ -23,6 +23,8 @@
 #include <BLEUtils.h>
 #include <BLEServer.h>
 #include <AESLib.h>
+#include <BLE2902.h>
+#include <BLESecurity.h>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Апартна конфігурація
@@ -78,6 +80,9 @@ byte aes_iv[]  = { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 };
 #define SERVICE_UUID        "12345678-1234-1234-1234-123456789abc"
 #define CHARACTERISTIC_UUID "abcd1234-5678-1234-5678-abcdef123456"
 BLECharacteristic *pCharacteristic;
+
+// ★★★ NEW: тримаємо сервер глобально + рестарт реклами після дисконекту
+BLEServer* gServer = nullptr;           // ★ NEW
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Таймери/інтервали (мс)
@@ -356,7 +361,7 @@ class MyCallbacks : public BLECharacteristicCallbacks {
       delay(100);
     }
 
-    // 2) Частковий патч: пишемо тільки надіслані ключі
+    // 2) Витягуємо параметри
     auto getIfStr = [&](const char* key, bool &has) -> String {
       has = data.hasOwnProperty(key) &&
             JSON.typeof(data[key]) != "undefined" &&
@@ -371,42 +376,60 @@ class MyCallbacks : public BLECharacteristicCallbacks {
     String imageName  = getIfStr("imageName",  hasImg);
     String roomName   = getIfStr("roomName",   hasRoom);
 
+    // 3) Зберігаємо в Preferences
     preferences.begin("config", false);
-    bool changed = false;
-    if (hasSSID) changed |= putIfChanged(preferences, "ssid",    ssid);
-    if (hasPwd)  changed |= putIfChanged(preferences, "enc_pwd", encPwd);
-    if (hasUser) changed |= putIfChanged(preferences, "username",  username);
-    if (hasImg)  changed |= putIfChanged(preferences, "imageName", imageName);
-    if (hasRoom) changed |= putIfChanged(preferences, "roomName",  roomName);
+    if (hasSSID) preferences.putString("ssid",    ssid);
+    if (hasPwd)  preferences.putString("enc_pwd", encPwd);
+    if (hasUser) preferences.putString("username",  username);
+    if (hasImg)  preferences.putString("imageName", imageName);
+    if (hasRoom) preferences.putString("roomName",  roomName);
 
     // configured=true якщо маємо і ssid, і enc_pwd
     String curSsid = preferences.getString("ssid", "");
     String curEnc  = preferences.getString("enc_pwd", "");
     bool cfgReady  = (curSsid.length() && curEnc.length());
     preferences.putBool("configured", cfgReady);
-    // позначаємо, що дані попередні до підтвердження сервером
-    preferences.putBool("own_provisional", true);
     preferences.end();
 
     bleConfigured = cfgReady;
 
-    // 3) Відповідь у Android (NOTIFY chipId)
+    // 4) Відповідь Android-у (chipId)
     pChar->setValue(uniqueId.c_str());
     pChar->notify();
     Serial.println("📤 Надіслано chipId назад: " + uniqueId);
 
-    // 4) Якщо змінено SSID/пароль → негайний reconnect + ранній sync
-    if (hasSSID || hasPwd) {
-      reconnectWithSavedWifi();
-      nextSyncAt = millis() + 5000; // перший sync ownership через 5с
+    // 5) Якщо прийшли нові Wi-Fi дані → пробуємо підключитись відразу
+    if (hasSSID && hasPwd) {
+      String plainPwd = decryptPassword(encPwd);
+      if (plainPwd.length() > 0) {
+        Serial.println("🚀 Підключення одразу з новими даними (без перезапуску)");
+        WiFi.mode(WIFI_STA);
+        WiFi.disconnect(true, true);
+        delay(200);
+        WiFi.begin(ssid.c_str(), plainPwd.c_str());
+      }
+      nextSyncAt = millis() + 5000;
       return;
     }
 
-    // 5) Якщо конфіг тепер валідний і Wi-Fi ще не підключений — підключитись
+    // 6) Якщо це повний конфіг, але Wi-Fi ще не підключений
     if (cfgReady && WiFi.status() != WL_CONNECTED) {
       reconnectWithSavedWifi();
       nextSyncAt = millis() + 5000;
     }
+  }
+};
+
+// ★★★ NEW: серверні колбеки — рестарт реклами після дисконекту
+class MyServerCallbacks : public BLEServerCallbacks {           // ★ NEW
+  void onConnect(BLEServer* s) override {
+    Serial.println("BLE client connected");
+  }
+  void onDisconnect(BLEServer* s) override {
+    Serial.println("BLE client disconnected -> restart advertising"); // ★ NEW
+    // деякі телефони інакше не бачать/не можуть переписати характеристику
+    s->startAdvertising();                                           // ★ NEW
+    // BLEDevice::startAdvertising();                                // (альтернатива)
   }
 };
 
@@ -421,8 +444,7 @@ void setup() {
   char id[13];
   sprintf(id, "%04X%08X", (uint32_t)(chipid >> 32), (uint32_t)chipid);
   uniqueId = String(id);
-  String last6 = uniqueId.substring(uniqueId.length() - 6);
-  bleName = "ESP32_" + last6;
+  bleName = "ESP32_" + uniqueId;
 
   // BLE init
   BLEDevice::init(bleName.c_str());
@@ -434,7 +456,9 @@ void setup() {
   BLEService *pService = pServer->createService(SERVICE_UUID);
   pCharacteristic = pService->createCharacteristic(
     CHARACTERISTIC_UUID,
-    BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY
+    BLECharacteristic::PROPERTY_WRITE |
+    BLECharacteristic::PROPERTY_WRITE_NR |  // ✅ дозволяє Android писати без відповіді
+    BLECharacteristic::PROPERTY_NOTIFY
   );
   pCharacteristic->setCallbacks(new MyCallbacks());
   pService->start();
@@ -443,9 +467,15 @@ void setup() {
   pAdvertising->addServiceUUID(SERVICE_UUID);
   pAdvertising->setScanResponse(true);
   pAdvertising->setMinPreferred(0x06);
-  BLEDevice::startAdvertising();
+  gServer->startAdvertising();
   Serial.println("BLE advertising started!");
   Serial.println("==========================");
+
+  // ★ OPTIONAL: вмикаємо BLE Secure Connections + Bonding (потрібні зміни в додатку)
+  BLESecurity *pSecurity = new BLESecurity();                    // ★ OPTIONAL
+  pSecurity->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM_BOND);
+  pSecurity->setCapability(ESP_IO_CAP_OUT); // або ESP_IO_CAP_NONE / KEYBOARD / DISPLAY
+  pSecurity->setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
 
   // NVS: чи вже конфігуровано
   preferences.begin("config", true);
