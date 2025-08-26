@@ -452,6 +452,11 @@ void setup() {
   Serial.println("ChipId: " + uniqueId);
   Serial.println("BLE Name: " + bleName);
 
+  // ★★★ CHANGED: створюємо сервер у gServer і ставимо колбеки
+  gServer = BLEDevice::createServer();                         // ★ CHANGED
+  gServer->setCallbacks(new MyServerCallbacks());              // ★ NEW
+  BLEService *pService = gServer->createService(SERVICE_UUID);
+
   BLEServer *pServer = BLEDevice::createServer();
   BLEService *pService = pServer->createService(SERVICE_UUID);
   pCharacteristic = pService->createCharacteristic(
@@ -461,6 +466,7 @@ void setup() {
     BLECharacteristic::PROPERTY_NOTIFY
   );
   pCharacteristic->setCallbacks(new MyCallbacks());
+  pCharacteristic->addDescriptor(new BLE2902());
   pService->start();
 
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
