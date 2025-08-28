@@ -324,7 +324,7 @@ void updateDisplay(float tempC, float humi, int smokeState, int lightState, floa
       int pInt = (int)pressure;
       lcd.print("P:"); lcd.print(pInt); lcd.print("hPa ");
     }
-    lcd.print("G:"); lcd.print(smokeState == LOW ? "Y " : "N ");
+    lcd.print("G:"); lcd.print(smokeState == HIGH ? "Y " : "N ");
     lcd.print("L:"); lcd.print(lightState == HIGH ? "D" : "L"); // Dark/Light
   } else {
     preferences.begin("config", true);
@@ -457,8 +457,6 @@ void setup() {
   gServer->setCallbacks(new MyServerCallbacks());              // ★ NEW
   BLEService *pService = gServer->createService(SERVICE_UUID);
 
-  BLEServer *pServer = BLEDevice::createServer();
-  BLEService *pService = pServer->createService(SERVICE_UUID);
   pCharacteristic = pService->createCharacteristic(
     CHARACTERISTIC_UUID,
     BLECharacteristic::PROPERTY_WRITE |
@@ -469,11 +467,12 @@ void setup() {
   pCharacteristic->addDescriptor(new BLE2902());
   pService->start();
 
+  // ★★★ CHANGED: старт реклами через сервер
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
   pAdvertising->setScanResponse(true);
   pAdvertising->setMinPreferred(0x06);
-  gServer->startAdvertising();
+  gServer->startAdvertising();                                   // ★ CHANGED
   Serial.println("BLE advertising started!");
   Serial.println("==========================");
 
@@ -483,7 +482,6 @@ void setup() {
   pSecurity->setCapability(ESP_IO_CAP_OUT); // або ESP_IO_CAP_NONE / KEYBOARD / DISPLAY
   pSecurity->setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
 
-  // NVS: чи вже конфігуровано
   preferences.begin("config", true);
   bleConfigured = preferences.getBool("configured", false);
   preferences.end();
@@ -564,7 +562,7 @@ void loop() {
     json += "\"Pressure\":";       json += (!isnan(bmePressure)) ? String(bmePressure, 2) : "null"; json += ",";
     json += "\"Altitude\":";       json += (!isnan(bmeAltitude)) ? String(bmeAltitude, 2) : "null"; json += ",";
 
-    json += "\"GasDetected\":";    json += (smokeState == LOW ? "true" : "false"); json += ",";
+    json += "\"GasDetected\":";    json += (smokeState == HIGH ? "true" : "false"); json += ",";
     json += "\"Light\":";          json += (lightState == HIGH ? "true" : "false"); json += ",";
 
     json += "\"MQ2Analog\":"           + String(mq2AnalogValue)  + ",";
