@@ -53,8 +53,8 @@ DHT dht(DHT_PIN, DHT_TYPE);     // DHT11 (t, h)
 // ─────────────────────────────────────────────────────────────────────────────
 // HTTP сервери/ендпоінти
 // ─────────────────────────────────────────────────────────────────────────────
-const char* serverName = "http://192.168.251.32:5210/api/sensordata"; // POST
-const char* apiBase    = "http://192.168.251.32:5210/api/sensordata"; // GET base
+const char* serverName = "http://192.168.242.32:5210/api/sensordata"; // POST
+const char* apiBase    = "http://192.168.242.32:5210/api/sensordata"; // GET base
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Глобальні стани/змінні
