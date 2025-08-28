@@ -46,8 +46,8 @@ Adafruit_BME280 bme;
 DHT dht(DHT_PIN, DHT_TYPE);
 
 // HTTP / API
-const char* serverName = "http://192.168.251.32:5210/api/sensordata";
-const char* apiBase    = "http://192.168.251.32:5210/api/sensordata";
+const char* serverName = "http://192.168.242.32:5210/api/sensordata";
+const char* apiBase    = "http://192.168.242.32:5210/api/sensordata";
 
 // Глобальні стани
 bool statusDisplayed = true;
