@@ -25,6 +25,7 @@
 #include <BLE2902.h>
 #include <BLESecurity.h>
 
+
 #define DHT_PIN          4
 #define Smoke_PIN        25
 #define Light_PIN        26
@@ -46,8 +47,8 @@ Adafruit_BME280 bme;
 DHT dht(DHT_PIN, DHT_TYPE);
 
 // HTTP / API
-const char* serverName = "http://192.168.242.32:5210/api/sensordata";
-const char* apiBase    = "http://192.168.242.32:5210/api/sensordata";
+const char* serverName = "http://192.168.0.200:5210/api/sensordata";
+const char* apiBase    = "http://192.168.0.200:5210/api/sensordata";
 
 // Глобальні стани
 bool statusDisplayed = true;
@@ -172,8 +173,10 @@ int syncOwnershipNoAuth() {
 
   preferences.begin("config", true);
   String etag = preferences.getString("own_etag", "");
+  String apiKey = preferences.getString("api_key", "");   
   preferences.end();
   if (etag.length()) http.addHeader("If-None-Match", etag);
+  if (apiKey.length()) http.addHeader("X-Api-Key", apiKey);
 
   Serial.println("🔎 GET " + url + (etag.length() ? (" (If-None-Match: " + etag + ")") : ""));
 
@@ -243,6 +246,13 @@ void updateDisplay(float tempC, float humi, int smokeState, int lightState, floa
     lcd.setCursor(0, 0);
     lcd.print("BLE:");  lcd.print(bleConfigured ? "OK " : "WAIT");
     lcd.print(" WiFi:"); lcd.print(WiFi.status() == WL_CONNECTED ? "OK" : "NO");
+
+    // ADD ↓↓↓ індикатор наявності ключа
+    preferences.begin("config", true);
+    bool hasKey = preferences.getString("api_key", "").length() > 0;
+    preferences.end();
+    lcd.setCursor(0,1);
+    lcd.print("API:"); lcd.print(hasKey ? "OK " : "NO ");
 
     if (bleConfigured && WiFi.status() == WL_CONNECTED) {
       statusDisplayed = false;
@@ -326,6 +336,9 @@ class MyCallbacks : public BLECharacteristicCallbacks {
     String imageName  = getIfStr("imageName",  hasImg);
     String roomName   = getIfStr("roomName",   hasRoom);
 
+    bool hasApi=false;
+    String apiKey     = getIfStr("apiKey",     hasApi);
+
     // 3) Зберігаємо в Preferences
     preferences.begin("config", false);
     if (hasSSID) preferences.putString("ssid",    ssid);
@@ -333,6 +346,11 @@ class MyCallbacks : public BLECharacteristicCallbacks {
     if (hasUser) preferences.putString("username",  username);
     if (hasImg)  preferences.putString("imageName", imageName);
     if (hasRoom) preferences.putString("roomName",  roomName);
+
+    if (hasApi && apiKey.length() >= 16 && apiKey.length() <= 128) {
+      preferences.putString("api_key", apiKey);
+      Serial.println("✅ API key saved");
+    }
 
     // configured=true якщо маємо і ssid, і enc_pwd
     String curSsid = preferences.getString("ssid", "");
@@ -445,6 +463,9 @@ void setup() {
   pinMode(Light_PIN, INPUT);
   delay(2000);
 
+  Serial.println("⏳ Прогрів MQ-2, зачекай 20 секунд...");
+  delay(20000);
+
   if (!bme.begin(0x76)) {
     Serial.println("Помилка BME280");
     bmeDetected = false;
@@ -499,7 +520,7 @@ void loop() {
     json += "\"Pressure\":";       json += (!isnan(bmePressure)) ? String(bmePressure, 2) : "null"; json += ",";
     json += "\"Altitude\":";       json += (!isnan(bmeAltitude)) ? String(bmeAltitude, 2) : "null"; json += ",";
     json += "\"GasDetected\":";    json += (smokeState == LOW ? "true" : "false"); json += ",";
-    json += "\"Light\":";          json += (lightState == HIGH ? "true" : "false"); json += ",";
+    json += "\"Light\":";          json += (lightState == LOW ? "true" : "false"); json += ",";
     json += "\"MQ2Analog\":"           + String(mq2AnalogValue)  + ",";
     json += "\"MQ2AnalogPercent\":"    + String(mq2Percent, 2)   + ",";
     json += "\"LightAnalog\":"         + String(lightAnalogValue)+ ",";
@@ -509,6 +530,15 @@ void loop() {
     HTTPClient http;
     http.begin(serverName);
     http.addHeader("Content-Type", "application/json");
+
+    //дістаємо ключ і додаємо заголовок
+    preferences.begin("config", true);
+    String apiKeyPost = preferences.getString("api_key", "");
+    preferences.end();
+    if (apiKeyPost.length()) {
+      http.addHeader("X-Api-Key", apiKeyPost);
+    }
+
     Serial.println("➡️ Надсилається JSON:"); Serial.println(json);
     int code = http.POST(json);
     if (code > 0) Serial.println("POST OK: " + String(code)); else Serial.println("POST ERR: " + String(code));
