@@ -4,8 +4,8 @@
     - Негайне перепідключення Wi-Fi після patch
     - Збереження у NVS (Preferences)
     - NOTIFY: надсилає ChipId назад Android
-    - Періодичний GET /sensordata/ownership/{chipId}/latest (ETag)
-    - POST телеметрії кожні 10 хв, повний JSON (null для відсутніх полів)
+    - Періодичний GET /sensordata/ownership/{chipId}/latest (ETag, X-Api-Key)
+    - POST телеметрії кожні 10 хв, повний JSON (null для відсутніх полів, X-Api-Key)
     =========================================================================== */
 
 #include <Wire.h>
@@ -17,7 +17,6 @@
 #include <SPI.h>
 #include <Adafruit_BMP280.h>
 #include <Adafruit_Sensor.h>
-#include <WiFiClientSecure.h>
 #include <Preferences.h>
 #include <BLEDevice.h>
 #include <BLEUtils.h>
@@ -27,7 +26,7 @@
 #include <BLESecurity.h>
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Апартна конфігурація
+// Піни / залізо
 // ─────────────────────────────────────────────────────────────────────────────
 #define DHT_PIN          4
 #define Smoke_PIN        25
@@ -36,10 +35,9 @@
 #define I2C_SCL_PIN      22
 #define MQ2_ANALOG_PIN   34
 #define LIGHT_ANALOG_PIN 35
-
 #define DHT_TYPE DHT11
 
-// LCD (I2C) 16x2
+// LCD 16x2 (I2C)
 #define LCD_ADDRESS 0x3F
 #define LCD_WIDTH   16
 #define LCD_HEIGHT  2
@@ -51,22 +49,22 @@ Adafruit_BMP280 bmp;            // BMP280 (t, p, altitude)
 DHT dht(DHT_PIN, DHT_TYPE);     // DHT11 (t, h)
 
 // ─────────────────────────────────────────────────────────────────────────────
-// HTTP сервери/ендпоінти
+// HTTP / API (вирівняно з 20x4; за потреби заміни IP)
 // ─────────────────────────────────────────────────────────────────────────────
-const char* serverName = "http://192.168.242.32:5210/api/sensordata"; // POST
-const char* apiBase    = "http://192.168.242.32:5210/api/sensordata"; // GET base
+const char* serverName = "http://192.168.0.200:5210/api/sensordata"; // POST
+const char* apiBase    = "http://192.168.0.200:5210/api/sensordata"; // GET base
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Глобальні стани/змінні
+// Глобальні стани
 // ─────────────────────────────────────────────────────────────────────────────
-bool   statusDisplayed = true;   // перший екран (BLE/WiFi) + привітання
+bool   statusDisplayed = true;   // перший екран (BLE/WiFi/API) + привітання
 String uniqueId;                 // 12-символьний HEX ChipId
-String bleName;                  // Ім’я BLE (ESP32_XXXXXX)
+String bleName;                  // Ім’я BLE (ESP32_XXXXXXXXXXXX)
 bool   bleConfigured = false;    // чи є валідна Wi-Fi конфігурація
 bool   bmpDetected   = true;
 
 AESLib aesLib;
-Preferences preferences;         // NVS "config"
+Preferences preferences;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AES ключ (синхронізовано з Android)
@@ -75,26 +73,22 @@ byte aes_key[] = { 'm','y','-','s','e','c','r','e','t','-','k','e','y','-','1','
 byte aes_iv[]  = { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// BLE сервіс (повідомлення + конфіг)
+// BLE сервіс
 // ─────────────────────────────────────────────────────────────────────────────
 #define SERVICE_UUID        "12345678-1234-1234-1234-123456789abc"
 #define CHARACTERISTIC_UUID "abcd1234-5678-1234-5678-abcdef123456"
-BLECharacteristic *pCharacteristic;
-
-// ★★★ NEW: тримаємо сервер глобально + рестарт реклами після дисконекту
-BLEServer* gServer = nullptr;           // ★ NEW
+BLECharacteristic *pCharacteristic = nullptr;
+BLEServer* gServer = nullptr;  // для рестарту реклами після дисконекту
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Таймери/інтервали (мс)
+// Таймери
 // ─────────────────────────────────────────────────────────────────────────────
 unsigned long lastTime = 0, displayRefreshTime = 0, wifiCheckTime = 0, nextSyncAt = 0;
 const unsigned long timerDelay             = 10UL * 60UL * 1000UL; // POST кожні 10 хв
 const unsigned long displayRefreshInterval = 10UL * 1000UL;        // LCD кожні 10 с
 const unsigned long wifiCheckInterval      = 60UL * 1000UL;        // перевірка Wi-Fi 60 с
-
-// ⭐ Синк ownership
 static const unsigned long SYNC_OK_PERIOD_MS   = 30UL * 60UL * 1000UL; // 30 хв
-static const unsigned long SYNC_FAIL_PERIOD_MS = 5UL  * 60UL * 1000UL; // бекоф 5 хв
+static const unsigned long SYNC_FAIL_PERIOD_MS = 5UL  * 60UL * 1000UL; // 5 хв
 
 // Чергування другого рядка LCD (сенсори ↔ назва кімнати)
 bool showRoomLine = false;
@@ -116,17 +110,14 @@ String decryptPassword(const String& encrypted) {
   decrypted[len] = '\0';
   String result = String((char*)decrypted);
 
-  // PKCS7 padding
+  // PKCS7 padding strip
   if (len > 0) {
     int pad = decrypted[len - 1];
-    if (pad > 0 && pad <= 16 && pad <= result.length()) {
-      result.remove(result.length() - pad);
-    }
+    if (pad > 0 && pad <= 16 && pad <= result.length()) result.remove(result.length() - pad);
   }
   return result;
 }
 
-// Писати в NVS тільки якщо значення змінилося
 static bool putIfChanged(Preferences& p, const char* key, const String& v) {
   String old = p.getString(key, "");
   if (v != old) { p.putString(key, v); return true; }
@@ -134,7 +125,7 @@ static bool putIfChanged(Preferences& p, const char* key, const String& v) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Wi-Fi (уніфіковано з 20x4: пряме підключення до збережених SSID/пароля)
+// Wi-Fi (як у 20x4): пряме підключення до збережених SSID/пароля
 // ─────────────────────────────────────────────────────────────────────────────
 bool reconnectWithSavedWifi() {
   preferences.begin("config", true);
@@ -173,22 +164,17 @@ bool reconnectWithSavedWifi() {
   }
 }
 
-void scanAndConnectWiFi() {
-  // для сумісності: просто пробуємо пряме підключення
-  reconnectWithSavedWifi();
-}
+void scanAndConnectWiFi() { reconnectWithSavedWifi(); }
 
 void checkWiFiConnection() {
   if (millis() - wifiCheckTime >= wifiCheckInterval) {
-    if (WiFi.status() != WL_CONNECTED && bleConfigured) {
-      reconnectWithSavedWifi();
-    }
+    if (WiFi.status() != WL_CONNECTED && bleConfigured) reconnectWithSavedWifi();
     wifiCheckTime = millis();
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Ownership sync (GET /ownership/{chipId}/latest) без авторизації + ETag
+// Ownership sync (GET /ownership/{chipId}/latest) з ETag та X-Api-Key
 // ─────────────────────────────────────────────────────────────────────────────
 int syncOwnershipNoAuth() {
   if (WiFi.status() != WL_CONNECTED) return -1;
@@ -197,11 +183,13 @@ int syncOwnershipNoAuth() {
   HTTPClient http;
   http.begin(url);
 
-  // ETag → If-None-Match
   preferences.begin("config", true);
-  String etag = preferences.getString("own_etag", "");
+  String etag  = preferences.getString("own_etag", "");
+  String apiKey= preferences.getString("api_key", "");
   preferences.end();
-  if (etag.length()) http.addHeader("If-None-Match", etag);
+
+  if (etag.length())  http.addHeader("If-None-Match", etag);
+  if (apiKey.length()) http.addHeader("X-Api-Key", apiKey);
 
   Serial.println("🔎 GET " + url + (etag.length() ? (" (If-None-Match: " + etag + ")") : ""));
 
@@ -210,11 +198,9 @@ int syncOwnershipNoAuth() {
   if (code == 304) {
     Serial.println("✅ 304 Not Modified");
     http.end();
-
     preferences.begin("config", false);
     preferences.putBool("own_provisional", false);
     preferences.end();
-
     return 0;
   }
 
@@ -249,7 +235,6 @@ int syncOwnershipNoAuth() {
   if (hasUser) changed |= putIfChanged(preferences, "username",  srvUsername);
   if (hasRoom) changed |= putIfChanged(preferences, "roomName",  srvRoomName);
   if (hasImg)  changed |= putIfChanged(preferences, "imageName", srvImage);
-
   if (newEtag.length()) preferences.putString("own_etag", newEtag);
   preferences.putBool("own_provisional", false);
   preferences.end();
@@ -265,35 +250,42 @@ void scheduleNextSync(int rc) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// LCD
+// LCD (адаптовано під 16 символів)
 // ─────────────────────────────────────────────────────────────────────────────
 void updateDisplay(float tempC, float humi, int smokeState, int lightState, float pressure) {
   lcd.clear();
 
   if (statusDisplayed) {
+    // Рядок 1: BLE/WiFi
     lcd.setCursor(0, 0);
     lcd.print("BLE:");
     lcd.print(bleConfigured ? "OK " : "WAIT");
-    lcd.print(" WiFi:");
+    lcd.print(" W:");
     lcd.print(WiFi.status() == WL_CONNECTED ? "OK" : "NO");
 
+    // Рядок 2: API OK/NO
+    preferences.begin("config", true);
+    bool hasKey = preferences.getString("api_key", "").length() > 0;
+    preferences.end();
+    lcd.setCursor(0, 1);
+    lcd.print("API:");
+    lcd.print(hasKey ? "OK " : "NO ");
+
+    // Показ привітання, якщо все готово
     if (bleConfigured && WiFi.status() == WL_CONNECTED) {
       statusDisplayed = false;
-
       preferences.begin("config", true);
       String username = preferences.getString("username", "");
       preferences.end();
-
       if (username.length() > 0) {
         String hello = "Hello, " + username;
+        // Прокрутка для довгих текстів у 16 символів
         if (hello.length() <= 16) {
-          lcd.setCursor(0, 1);
-          lcd.print(hello);
+          lcd.clear(); lcd.setCursor(0, 0); lcd.print(hello);
           delay(1500);
         } else {
           for (int i = 0; i <= hello.length() - 16; i++) {
-            lcd.setCursor(0, 1);
-            lcd.print(hello.substring(i, i + 16));
+            lcd.clear(); lcd.setCursor(0, 0); lcd.print(hello.substring(i, i + 16));
             delay(300);
           }
         }
@@ -302,7 +294,7 @@ void updateDisplay(float tempC, float humi, int smokeState, int lightState, floa
     return;
   }
 
-  // 1-й рядок: температура/вологість
+  // 1-й рядок: T/H або ERROR
   lcd.setCursor(0, 0);
   if (isnan(tempC) || isnan(humi)) {
     lcd.print("Temp/Hum: ERR");
@@ -315,17 +307,21 @@ void updateDisplay(float tempC, float humi, int smokeState, int lightState, floa
     lcd.print("%");
   }
 
-  // 2-й рядок: сенсори або назва кімнати (чергується)
+  // 2-й рядок: P/G/L або Room (чергується)
   lcd.setCursor(0, 1);
   if (!showRoomLine) {
     if (!bmpDetected || isnan(pressure)) {
       lcd.print("P:ERR ");
     } else {
       int pInt = (int)pressure;
-      lcd.print("P:"); lcd.print(pInt); lcd.print("hPa ");
+      lcd.print("P:");
+      lcd.print(pInt);
+      lcd.print("hPa ");
     }
-    lcd.print("G:"); lcd.print(smokeState == HIGH ? "Y " : "N ");
-    lcd.print("L:"); lcd.print(lightState == HIGH ? "D" : "L"); // Dark/Light
+    lcd.print("G:");
+    lcd.print((smokeState == LOW) ? "Y " : "N "); // як у 20x4: LOW = виявлено
+    lcd.print("L:");
+    lcd.print((lightState == LOW) ? "L" : "D");   // як у 20x4: LOW = Light=true (тут L=Light, D=Dark)
   } else {
     preferences.begin("config", true);
     String roomName = preferences.getString("roomName", "NoRoom");
@@ -369,20 +365,25 @@ class MyCallbacks : public BLECharacteristicCallbacks {
       return has ? String((const char*)data[key]) : String("");
     };
 
-    bool hasSSID=false, hasPwd=false, hasUser=false, hasImg=false, hasRoom=false;
+    bool hasSSID=false, hasPwd=false, hasUser=false, hasImg=false, hasRoom=false, hasApi=false;
     String ssid       = getIfStr("ssid",       hasSSID);
     String encPwd     = getIfStr("password",   hasPwd);
     String username   = getIfStr("username",   hasUser);
     String imageName  = getIfStr("imageName",  hasImg);
     String roomName   = getIfStr("roomName",   hasRoom);
+    String apiKey     = getIfStr("apiKey",     hasApi);
 
-    // 3) Зберігаємо в Preferences
+    // 3) Зберігаємо в Preferences (часткове оновлення)
     preferences.begin("config", false);
-    if (hasSSID) preferences.putString("ssid",    ssid);
-    if (hasPwd)  preferences.putString("enc_pwd", encPwd);
+    if (hasSSID) preferences.putString("ssid",      ssid);
+    if (hasPwd)  preferences.putString("enc_pwd",   encPwd);
     if (hasUser) preferences.putString("username",  username);
     if (hasImg)  preferences.putString("imageName", imageName);
     if (hasRoom) preferences.putString("roomName",  roomName);
+    if (hasApi && apiKey.length() >= 16 && apiKey.length() <= 128) {
+      preferences.putString("api_key", apiKey);
+      Serial.println("✅ API key saved");
+    }
 
     // configured=true якщо маємо і ssid, і enc_pwd
     String curSsid = preferences.getString("ssid", "");
@@ -398,11 +399,11 @@ class MyCallbacks : public BLECharacteristicCallbacks {
     pChar->notify();
     Serial.println("📤 Надіслано chipId назад: " + uniqueId);
 
-    // 5) Якщо прийшли нові Wi-Fi дані → пробуємо підключитись відразу
+    // 5) Якщо прийшли нові Wi-Fi дані → підключаємось одразу
     if (hasSSID && hasPwd) {
       String plainPwd = decryptPassword(encPwd);
       if (plainPwd.length() > 0) {
-        Serial.println("🚀 Підключення одразу з новими даними (без перезапуску)");
+        Serial.println("🚀 Підключення з новими Wi-Fi даними без перезапуску");
         WiFi.mode(WIFI_STA);
         WiFi.disconnect(true, true);
         delay(200);
@@ -412,7 +413,7 @@ class MyCallbacks : public BLECharacteristicCallbacks {
       return;
     }
 
-    // 6) Якщо це повний конфіг, але Wi-Fi ще не підключений
+    // 6) Якщо конфіг вже готовий, але Wi-Fi ще не підключився
     if (cfgReady && WiFi.status() != WL_CONNECTED) {
       reconnectWithSavedWifi();
       nextSyncAt = millis() + 5000;
@@ -420,16 +421,14 @@ class MyCallbacks : public BLECharacteristicCallbacks {
   }
 };
 
-// ★★★ NEW: серверні колбеки — рестарт реклами після дисконекту
-class MyServerCallbacks : public BLEServerCallbacks {           // ★ NEW
+// Рестарт реклами після дисконекту (стабільність перепису характеристики)
+class MyServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer* s) override {
     Serial.println("BLE client connected");
   }
   void onDisconnect(BLEServer* s) override {
-    Serial.println("BLE client disconnected -> restart advertising"); // ★ NEW
-    // деякі телефони інакше не бачать/не можуть переписати характеристику
-    s->startAdvertising();                                           // ★ NEW
-    // BLEDevice::startAdvertising();                                // (альтернатива)
+    Serial.println("BLE client disconnected -> restart advertising");
+    s->startAdvertising();
   }
 };
 
@@ -439,7 +438,7 @@ class MyServerCallbacks : public BLEServerCallbacks {           // ★ NEW
 void setup() {
   Serial.begin(115200);
 
-  // Унікальний ChipId + BLE ім’я (останні 6 символів для зручності)
+  // Унікальний ChipId + BLE ім’я
   uint64_t chipid = ESP.getEfuseMac();
   char id[13];
   sprintf(id, "%04X%08X", (uint32_t)(chipid >> 32), (uint32_t)chipid);
@@ -451,35 +450,32 @@ void setup() {
   Serial.println("=== BLE ІНІЦІАЛІЗАЦІЯ ===");
   Serial.println("ChipId: " + uniqueId);
   Serial.println("BLE Name: " + bleName);
-
-  // ★★★ CHANGED: створюємо сервер у gServer і ставимо колбеки
-  gServer = BLEDevice::createServer();                         // ★ CHANGED
-  gServer->setCallbacks(new MyServerCallbacks());              // ★ NEW
+  gServer = BLEDevice::createServer();
+  gServer->setCallbacks(new MyServerCallbacks());
   BLEService *pService = gServer->createService(SERVICE_UUID);
 
   pCharacteristic = pService->createCharacteristic(
     CHARACTERISTIC_UUID,
     BLECharacteristic::PROPERTY_WRITE |
-    BLECharacteristic::PROPERTY_WRITE_NR |  // ✅ дозволяє Android писати без відповіді
+    BLECharacteristic::PROPERTY_WRITE_NR |
     BLECharacteristic::PROPERTY_NOTIFY
   );
   pCharacteristic->setCallbacks(new MyCallbacks());
   pCharacteristic->addDescriptor(new BLE2902());
   pService->start();
 
-  // ★★★ CHANGED: старт реклами через сервер
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
   pAdvertising->setScanResponse(true);
   pAdvertising->setMinPreferred(0x06);
-  gServer->startAdvertising();                                   // ★ CHANGED
+  gServer->startAdvertising();
   Serial.println("BLE advertising started!");
   Serial.println("==========================");
 
-  // ★ OPTIONAL: вмикаємо BLE Secure Connections + Bonding (потрібні зміни в додатку)
-  BLESecurity *pSecurity = new BLESecurity();                    // ★ OPTIONAL
+  // (опціонально) Secure Connections + Bonding
+  BLESecurity *pSecurity = new BLESecurity();
   pSecurity->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM_BOND);
-  pSecurity->setCapability(ESP_IO_CAP_OUT); // або ESP_IO_CAP_NONE / KEYBOARD / DISPLAY
+  pSecurity->setCapability(ESP_IO_CAP_OUT);
   pSecurity->setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
 
   preferences.begin("config", true);
@@ -496,17 +492,16 @@ void setup() {
   dht.begin();
   pinMode(Smoke_PIN, INPUT);
   pinMode(Light_PIN, INPUT);
-  delay(2000);
+
+  Serial.println("⏳ Прогрів MQ-2, зачекай 20 секунд...");
+  delay(20000);
 
   if (!bmp.begin(0x76)) {
     Serial.println("Помилка BMP280");
     bmpDetected = false;
   }
 
-  // Wi-Fi (за наявності конфігу з BLE)
-  if (bleConfigured) {
-    scanAndConnectWiFi();
-  }
+  if (bleConfigured) scanAndConnectWiFi();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -527,7 +522,7 @@ void loop() {
     displayRefreshTime = millis();
   }
 
-  // 3) Періодичний синк ownership (без токена)
+  // 3) Періодичний синк ownership
   if (WiFi.status() == WL_CONNECTED && bleConfigured && millis() >= nextSyncAt) {
     int rc = syncOwnershipNoAuth();   // 1: оновлено, 0: без змін, -1: помилка
     scheduleNextSync(rc);
@@ -553,18 +548,14 @@ void loop() {
     // JSON (ідентичний до 20x4; null, якщо даних нема)
     String json = "{";
     json += "\"ChipId\":\"" + uniqueId + "\",";
-
     json += "\"TemperatureDht\":"; json += isnan(tempC) ? "null" : String(tempC, 2); json += ",";
     json += "\"HumidityDht\":";    json += isnan(humi)  ? "null" : String(humi, 2) ; json += ",";
-
     json += "\"TemperatureBme\":"; json += (!isnan(bmeTemp))     ? String(bmeTemp, 2)     : "null"; json += ",";
     json += "\"HumidityBme\":";    json += "null,"; // BMP не має вологості
     json += "\"Pressure\":";       json += (!isnan(bmePressure)) ? String(bmePressure, 2) : "null"; json += ",";
     json += "\"Altitude\":";       json += (!isnan(bmeAltitude)) ? String(bmeAltitude, 2) : "null"; json += ",";
-
-    json += "\"GasDetected\":";    json += (smokeState == HIGH ? "true" : "false"); json += ",";
-    json += "\"Light\":";          json += (lightState == HIGH ? "true" : "false"); json += ",";
-
+    json += "\"GasDetected\":";    json += (smokeState == LOW ? "true" : "false"); json += ",";  // як у 20x4
+    json += "\"Light\":";          json += (lightState == LOW ? "true" : "false");   json += ","; // як у 20x4
     json += "\"MQ2Analog\":"           + String(mq2AnalogValue)  + ",";
     json += "\"MQ2AnalogPercent\":"    + String(mq2Percent, 2)   + ",";
     json += "\"LightAnalog\":"         + String(lightAnalogValue)+ ",";
@@ -574,6 +565,12 @@ void loop() {
     HTTPClient http;
     http.begin(serverName);
     http.addHeader("Content-Type", "application/json");
+
+    // дістаємо ключ і додаємо заголовок (як у 20x4)
+    preferences.begin("config", true);
+    String apiKeyPost = preferences.getString("api_key", "");
+    preferences.end();
+    if (apiKeyPost.length()) http.addHeader("X-Api-Key", apiKeyPost);
 
     Serial.println("➡️ Надсилається JSON:");
     Serial.println(json);
