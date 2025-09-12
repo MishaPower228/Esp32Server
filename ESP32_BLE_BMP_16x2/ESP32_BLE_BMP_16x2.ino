@@ -1,11 +1,10 @@
 /*  ===========================================================================
     ESP32 ENV NODE (16x2 LCD, BMP280 + DHT11, BLE конфіг, Wi-Fi, HTTP)
-    - BLE write JSON (повний конфіг або Wi-Fi patch, без затирання відсутніх полів)
-    - Негайне перепідключення Wi-Fi після patch
-    - Збереження у NVS (Preferences)
-    - NOTIFY: надсилає ChipId назад Android
-    - Періодичний GET /sensordata/ownership/{chipId}/latest (ETag, X-Api-Key)
-    - POST телеметрії кожні 10 хв, повний JSON (null для відсутніх полів, X-Api-Key)
+    - BLE write JSON: часткове оновлення (ssid, password[encrypted], username,
+      imageName, roomName, apiKey), reset=true очищає NVS
+    - Збереження в NVS (Preferences), негайне Wi-Fi reconnect після патча
+    - Періодичний GET  /api/SensorData/sync/{chipId} (If-None-Match + X-Api-Key)
+    - Періодичний POST /api/SensorData          (повний JSON + X-Api-Key)
     =========================================================================== */
 
 #include <Wire.h>
@@ -25,9 +24,7 @@
 #include <BLE2902.h>
 #include <BLESecurity.h>
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Піни / залізо
-// ─────────────────────────────────────────────────────────────────────────────
+// ────────────────────────── Піни ──────────────────────────
 #define DHT_PIN          4
 #define Smoke_PIN        25
 #define Light_PIN        26
@@ -45,77 +42,60 @@ LiquidCrystal_I2C lcd(LCD_ADDRESS, LCD_WIDTH, LCD_HEIGHT);
 
 // Датчики
 #define SEALEVELPRESSURE_HPA (1013.25)
-Adafruit_BMP280 bmp;            // BMP280 (t, p, altitude)
-DHT dht(DHT_PIN, DHT_TYPE);     // DHT11 (t, h)
+Adafruit_BMP280 bmp;
+DHT dht(DHT_PIN, DHT_TYPE);
 
-// ─────────────────────────────────────────────────────────────────────────────
-// HTTP / API (вирівняно з 20x4; за потреби заміни IP)
-// ─────────────────────────────────────────────────────────────────────────────
-const char* serverName = "http://192.168.0.200:5210/api/sensordata"; // POST
-const char* apiBase    = "http://192.168.0.200:5210/api/sensordata"; // GET base
+// ────────────────────────── HTTP ──────────────────────────
+// БАЗА (лише її підправ, шляхи нижче фіксовані під ТВОЇ ендпоінти)
+static const char* SERVER_BASE = "http://192.168.0.200:5210";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Глобальні стани
-// ─────────────────────────────────────────────────────────────────────────────
-bool   statusDisplayed = true;   // перший екран (BLE/WiFi/API) + привітання
-String uniqueId;                 // 12-символьний HEX ChipId
-String bleName;                  // Ім’я BLE (ESP32_XXXXXXXXXXXX)
-bool   bleConfigured = false;    // чи є валідна Wi-Fi конфігурація
+// POST:  SERVER_BASE + /api/SensorData
+// GET :  SERVER_BASE + /api/SensorData/sync/{chipId}
+
+// ────────────────────────── Глобальні ──────────────────────────
+bool   statusDisplayed = true;
+String uniqueId;
+String bleName;
+bool   bleConfigured = false;
 bool   bmpDetected   = true;
 
 AESLib aesLib;
 Preferences preferences;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// AES ключ (синхронізовано з Android)
-// ─────────────────────────────────────────────────────────────────────────────
-byte aes_key[] = { 'm','y','-','s','e','c','r','e','t','-','k','e','y','-','1','2' }; // 16B AES-128
+// AES-128 ключ для локального дешифру Wi-Fi пароля
+byte aes_key[] = { 'm','y','-','s','e','c','r','e','t','-','k','e','y','-','1','2' }; // 16B
 byte aes_iv[]  = { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// BLE сервіс
-// ─────────────────────────────────────────────────────────────────────────────
 #define SERVICE_UUID        "12345678-1234-1234-1234-123456789abc"
 #define CHARACTERISTIC_UUID "abcd1234-5678-1234-5678-abcdef123456"
 BLECharacteristic *pCharacteristic = nullptr;
-BLEServer* gServer = nullptr;  // для рестарту реклами після дисконекту
+BLEServer* gServer = nullptr;
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Таймери
-// ─────────────────────────────────────────────────────────────────────────────
 unsigned long lastTime = 0, displayRefreshTime = 0, wifiCheckTime = 0, nextSyncAt = 0;
-const unsigned long timerDelay             = 10UL * 60UL * 1000UL; // POST кожні 10 хв
-const unsigned long displayRefreshInterval = 10UL * 1000UL;        // LCD кожні 10 с
-const unsigned long wifiCheckInterval      = 60UL * 1000UL;        // перевірка Wi-Fi 60 с
-static const unsigned long SYNC_OK_PERIOD_MS   = 30UL * 60UL * 1000UL; // 30 хв
-static const unsigned long SYNC_FAIL_PERIOD_MS = 5UL  * 60UL * 1000UL; // 5 хв
-
-// Чергування другого рядка LCD (сенсори ↔ назва кімнати)
+const unsigned long POST_PERIOD_MS         = 10UL * 60UL * 1000UL; // 10 хв
+const unsigned long LCD_REFRESH_MS         = 10UL * 1000UL;        // 10 с
+const unsigned long WIFI_CHECK_MS          = 60UL * 1000UL;        // 60 с
+const unsigned long SYNC_OK_PERIOD_MS      = 30UL * 60UL * 1000UL; // 30 хв
+const unsigned long SYNC_FAIL_PERIOD_MS    = 5UL  * 60UL * 1000UL; // 5 хв
 bool showRoomLine = false;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Утиліти
-// ─────────────────────────────────────────────────────────────────────────────
+// ────────────────────────── Утиліти ──────────────────────────
 String decryptPassword(const String& encrypted) {
-  int inputLength = encrypted.length() + 1;
-  char input[inputLength];
-  encrypted.toCharArray(input, inputLength);
+  int n = encrypted.length() + 1;
+  char input[n]; encrypted.toCharArray(input, n);
 
-  byte decrypted[256];
-  int len = aesLib.decrypt64(input, inputLength, decrypted, aes_key, 128, aes_iv);
-  if (len <= 0) {
-    Serial.println("❌ Помилка дешифрування!");
-    return "";
-  }
-  decrypted[len] = '\0';
-  String result = String((char*)decrypted);
+  byte out[256];
+  int len = aesLib.decrypt64(input, n, out, aes_key, 128, aes_iv);
+  if (len <= 0) return "";
 
-  // PKCS7 padding strip
+  out[len] = '\0';
+  String s = String((char*)out);
   if (len > 0) {
-    int pad = decrypted[len - 1];
-    if (pad > 0 && pad <= 16 && pad <= result.length()) result.remove(result.length() - pad);
+    int pad = out[len - 1];
+    if (pad > 0 && pad <= 16 && pad <= (int)s.length()) s.remove(s.length() - pad);
   }
-  return result;
+  return s;
 }
 
 static bool putIfChanged(Preferences& p, const char* key, const String& v) {
@@ -124,9 +104,7 @@ static bool putIfChanged(Preferences& p, const char* key, const String& v) {
   return false;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Wi-Fi (як у 20x4): пряме підключення до збережених SSID/пароля
-// ─────────────────────────────────────────────────────────────────────────────
+// ────────────────────────── Wi-Fi ──────────────────────────
 bool reconnectWithSavedWifi() {
   preferences.begin("config", true);
   String ssid   = preferences.getString("ssid", "");
@@ -134,80 +112,52 @@ bool reconnectWithSavedWifi() {
   preferences.end();
 
   String pass = decryptPassword(encPwd);
-  Serial.println("🔐 enc: " + encPwd);
-  Serial.println("🔓 dec: " + pass);
-
-  if (ssid.isEmpty() || pass.isEmpty()) {
-    Serial.println("❌ Немає збережених SSID/пароля для підключення");
-    return false;
-  }
+  if (ssid.isEmpty() || pass.isEmpty()) return false;
 
   WiFi.mode(WIFI_STA);
-  WiFi.disconnect(true, true);  // повний ресет Wi-Fi стека
+  WiFi.disconnect(true, true);
   delay(200);
-  Serial.printf("📶 Підключення до SSID='%s'...\n", ssid.c_str());
   WiFi.begin(ssid.c_str(), pass.c_str());
 
   unsigned long t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) {
-    delay(500);
-    Serial.print(".");
-  }
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\n✅ Wi-Fi підключено: " + WiFi.localIP().toString());
-    lcd.clear(); lcd.setCursor(0,0); lcd.print("IP: "); lcd.print(WiFi.localIP());
-    delay(1500);
-    return true;
-  } else {
-    Serial.println("\n❌ Не вдалося підключитись до мережі");
-    return false;
-  }
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) { delay(500); }
+  return WiFi.status() == WL_CONNECTED;
 }
 
-void scanAndConnectWiFi() { reconnectWithSavedWifi(); }
-
 void checkWiFiConnection() {
-  if (millis() - wifiCheckTime >= wifiCheckInterval) {
+  if (millis() - wifiCheckTime >= WIFI_CHECK_MS) {
     if (WiFi.status() != WL_CONNECTED && bleConfigured) reconnectWithSavedWifi();
     wifiCheckTime = millis();
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Ownership sync (GET /ownership/{chipId}/latest) з ETag та X-Api-Key
-// ─────────────────────────────────────────────────────────────────────────────
-int syncOwnershipNoAuth() {
+// ────────────────────────── SYNC GET (/api/SensorData/sync/{chipId}) ──────────────────────────
+// Повертає JSON (username, roomName, imageName). Використовує If-None-Match + X-Api-Key.
+int syncFromServer() {
   if (WiFi.status() != WL_CONNECTED) return -1;
 
-  String url = String(apiBase) + "/ownership/" + uniqueId + "/latest";
-  HTTPClient http;
-  http.begin(url);
+  String url = String(SERVER_BASE) + "/api/SensorData/sync/" + uniqueId;
 
   preferences.begin("config", true);
-  String etag  = preferences.getString("own_etag", "");
+  String etag  = preferences.getString("sync_etag", "");
   String apiKey= preferences.getString("api_key", "");
   preferences.end();
 
-  if (etag.length())  http.addHeader("If-None-Match", etag);
-  if (apiKey.length()) http.addHeader("X-Api-Key", apiKey);
+  HTTPClient http;
+  http.begin(url);
 
-  Serial.println("🔎 GET " + url + (etag.length() ? (" (If-None-Match: " + etag + ")") : ""));
+  if (etag.length())   http.addHeader("If-None-Match", etag);
+  if (apiKey.length()) http.addHeader("X-Api-Key", apiKey);
 
   int code = http.GET();
 
   if (code == 304) {
-    Serial.println("✅ 304 Not Modified");
     http.end();
-    preferences.begin("config", false);
-    preferences.putBool("own_provisional", false);
-    preferences.end();
-    return 0;
+    return 0; // без змін
   }
-
   if (code != 200) {
-    Serial.println("❌ GET помилка: " + String(code));
     http.end();
-    return -1;
+    return -1; // помилка
   }
 
   String body    = http.getString();
@@ -215,177 +165,110 @@ int syncOwnershipNoAuth() {
   http.end();
 
   JSONVar obj = JSON.parse(body);
-  if (JSON.typeof(obj) != "object") {
-    Serial.println("❌ JSON від сервера некоректний");
-    return -1;
-  }
+  if (JSON.typeof(obj) != "object") return -1;
 
-  auto getIfPresent = [&](const char* key, bool& has) -> String {
-    has = (JSON.typeof(obj[key]) != "undefined" && JSON.typeof(obj[key]) != "null");
-    return has ? String((const char*)obj[key]) : String("");
+  auto getIf = [&](const char* k, bool &has) -> String {
+    has = (JSON.typeof(obj[k]) != "undefined" && JSON.typeof(obj[k]) != "null");
+    return has ? String((const char*)obj[k]) : String("");
   };
 
-  bool hasUser=false, hasRoom=false, hasImg=false;
-  String srvUsername = getIfPresent("username",  hasUser);
-  String srvRoomName = getIfPresent("roomName",  hasRoom);
-  String srvImage    = getIfPresent("imageName", hasImg);
+  bool hu=false, hr=false, hi=false;
+  String u = getIf("username",  hu);
+  String r = getIf("roomName",  hr);
+  String i = getIf("imageName", hi);
 
   bool changed = false;
   preferences.begin("config", false);
-  if (hasUser) changed |= putIfChanged(preferences, "username",  srvUsername);
-  if (hasRoom) changed |= putIfChanged(preferences, "roomName",  srvRoomName);
-  if (hasImg)  changed |= putIfChanged(preferences, "imageName", srvImage);
-  if (newEtag.length()) preferences.putString("own_etag", newEtag);
-  preferences.putBool("own_provisional", false);
+  if (hu) changed |= putIfChanged(preferences, "username",  u);
+  if (hr) changed |= putIfChanged(preferences, "roomName",  r);
+  if (hi) changed |= putIfChanged(preferences, "imageName", i);
+  if (newEtag.length()) preferences.putString("sync_etag", newEtag);
   preferences.end();
 
-  Serial.println(changed ? "✅ Ownership оновлено (200 OK)" : "✅ 200 OK без змін");
   return changed ? 1 : 0;
 }
 
 void scheduleNextSync(int rc) {
   unsigned long period = (rc >= 0) ? SYNC_OK_PERIOD_MS : SYNC_FAIL_PERIOD_MS;
   nextSyncAt = millis() + period;
-  Serial.printf("⏱ Наступний синк через %lus\n", period / 1000UL);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// LCD (адаптовано під 16 символів)
-// ─────────────────────────────────────────────────────────────────────────────
+// ────────────────────────── LCD ──────────────────────────
 void updateDisplay(float tempC, float humi, int smokeState, int lightState, float pressure) {
   lcd.clear();
 
   if (statusDisplayed) {
-    // Рядок 1: BLE/WiFi
     lcd.setCursor(0, 0);
-    lcd.print("BLE:");
-    lcd.print(bleConfigured ? "OK " : "WAIT");
-    lcd.print(" W:");
-    lcd.print(WiFi.status() == WL_CONNECTED ? "OK" : "NO");
+    lcd.print("BLE:"); lcd.print(bleConfigured ? "OK " : "WAIT");
+    lcd.print("W:");   lcd.print(WiFi.status() == WL_CONNECTED ? "OK" : "NO");
 
-    // Рядок 2: API OK/NO
     preferences.begin("config", true);
     bool hasKey = preferences.getString("api_key", "").length() > 0;
     preferences.end();
-    lcd.setCursor(0, 1);
-    lcd.print("API:");
-    lcd.print(hasKey ? "OK " : "NO ");
 
-    // Показ привітання, якщо все готово
-    if (bleConfigured && WiFi.status() == WL_CONNECTED) {
-      statusDisplayed = false;
-      preferences.begin("config", true);
-      String username = preferences.getString("username", "");
-      preferences.end();
-      if (username.length() > 0) {
-        String hello = "Hello, " + username;
-        // Прокрутка для довгих текстів у 16 символів
-        if (hello.length() <= 16) {
-          lcd.clear(); lcd.setCursor(0, 0); lcd.print(hello);
-          delay(1500);
-        } else {
-          for (int i = 0; i <= hello.length() - 16; i++) {
-            lcd.clear(); lcd.setCursor(0, 0); lcd.print(hello.substring(i, i + 16));
-            delay(300);
-          }
-        }
-      }
-    }
+    lcd.setCursor(0, 1);
+    lcd.print("API:"); lcd.print(hasKey ? "OK" : "NO");
+    if (bleConfigured && WiFi.status() == WL_CONNECTED) statusDisplayed = false;
     return;
   }
 
-  // 1-й рядок: T/H або ERROR
+  // 1-й рядок
   lcd.setCursor(0, 0);
-  if (isnan(tempC) || isnan(humi)) {
-    lcd.print("Temp/Hum: ERR");
-  } else {
-    lcd.print("T:");
-    lcd.print((int)tempC);
-    lcd.write(223); // °
-    lcd.print("C H:");
-    lcd.print((int)humi);
-    lcd.print("%");
+  if (isnan(tempC) || isnan(humi)) lcd.print("Temp/Hum: ERR");
+  else {
+    lcd.print("T:"); lcd.print((int)tempC); lcd.write(223); lcd.print("C ");
+    lcd.print("H:"); lcd.print((int)humi);  lcd.print("%");
   }
 
-  // 2-й рядок: P/G/L або Room (чергується)
+  // 2-й рядок (чергується)
   lcd.setCursor(0, 1);
   if (!showRoomLine) {
-    if (!bmpDetected || isnan(pressure)) {
-      lcd.print("P:ERR ");
-    } else {
-      int pInt = (int)pressure;
-      lcd.print("P:");
-      lcd.print(pInt);
-      lcd.print("hPa ");
-    }
-    lcd.print("G:");
-    lcd.print((smokeState == LOW) ? "Y " : "N "); // як у 20x4: LOW = виявлено
-    lcd.print("L:");
-    lcd.print((lightState == LOW) ? "L" : "D");   // як у 20x4: LOW = Light=true (тут L=Light, D=Dark)
+    if (isnan(pressure)) lcd.print("P:ERR ");
+    else { lcd.print("P:"); lcd.print((int)pressure); lcd.print("hPa "); }
+    lcd.print("G:"); lcd.print((smokeState == LOW) ? "Y " : "N ");
+    lcd.print("L:"); lcd.print((lightState == LOW) ? "L" : "D");
   } else {
     preferences.begin("config", true);
     String roomName = preferences.getString("roomName", "NoRoom");
     preferences.end();
-    if (roomName.length() <= 16) lcd.print(roomName);
-    else                         lcd.print(roomName.substring(0, 16));
+    if (roomName.length() <= 16) lcd.print(roomName); else lcd.print(roomName.substring(0,16));
   }
   showRoomLine = !showRoomLine;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// BLE: прийом JSON → NVS (часткове оновлення) + notify chipId + негайний Wi-Fi reconnect
-// ─────────────────────────────────────────────────────────────────────────────
+// ────────────────────────── BLE (конфіг JSON) ──────────────────────────
 class MyCallbacks : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic *pChar) override {
-    String jsonStr = String(pChar->getValue().c_str());
-    Serial.println("📥 Отримано BLE JSON:");
-    Serial.println(jsonStr);
+  void onWrite(BLECharacteristic *c) override {
+    String s = String(c->getValue().c_str());
+    JSONVar data = JSON.parse(s);
+    if (JSON.typeof(data) == "undefined") return;
 
-    JSONVar data = JSON.parse(jsonStr);
-    if (JSON.typeof(data) == "undefined") {
-      Serial.println("❌ JSON невірний");
-      return;
-    }
+    bool reset = data.hasOwnProperty("reset") && (bool)data["reset"];
+    if (reset) { preferences.begin("config", false); preferences.clear(); preferences.end(); delay(100); }
 
-    // 1) reset=true → повне очищення
-    bool shouldReset = (data.hasOwnProperty("reset") && (bool)data["reset"]);
-    if (shouldReset) {
-      Serial.println("🔄 Очищення Preferences через reset=true");
-      preferences.begin("config", false);
-      preferences.clear();
-      preferences.end();
-      delay(100);
-    }
-
-    // 2) Витягуємо параметри
-    auto getIfStr = [&](const char* key, bool &has) -> String {
-      has = data.hasOwnProperty(key) &&
-            JSON.typeof(data[key]) != "undefined" &&
-            JSON.typeof(data[key]) != "null";
-      return has ? String((const char*)data[key]) : String("");
+    auto getIf = [&](const char* k, bool &has) -> String {
+      has = data.hasOwnProperty(k) &&
+            JSON.typeof(data[k]) != "undefined" &&
+            JSON.typeof(data[k]) != "null";
+      return has ? String((const char*)data[k]) : String("");
     };
 
-    bool hasSSID=false, hasPwd=false, hasUser=false, hasImg=false, hasRoom=false, hasApi=false;
-    String ssid       = getIfStr("ssid",       hasSSID);
-    String encPwd     = getIfStr("password",   hasPwd);
-    String username   = getIfStr("username",   hasUser);
-    String imageName  = getIfStr("imageName",  hasImg);
-    String roomName   = getIfStr("roomName",   hasRoom);
-    String apiKey     = getIfStr("apiKey",     hasApi);
+    bool hS=false,hP=false,hU=false,hI=false,hR=false,hK=false;
+    String ssid   = getIf("ssid",      hS);
+    String encPwd = getIf("password",  hP);
+    String user   = getIf("username",  hU);
+    String img    = getIf("imageName", hI);
+    String room   = getIf("roomName",  hR);
+    String key    = getIf("apiKey",    hK);
 
-    // 3) Зберігаємо в Preferences (часткове оновлення)
     preferences.begin("config", false);
-    if (hasSSID) preferences.putString("ssid",      ssid);
-    if (hasPwd)  preferences.putString("enc_pwd",   encPwd);
-    if (hasUser) preferences.putString("username",  username);
-    if (hasImg)  preferences.putString("imageName", imageName);
-    if (hasRoom) preferences.putString("roomName",  roomName);
-    if (hasApi && apiKey.length() >= 16 && apiKey.length() <= 128) {
-      preferences.putString("api_key", apiKey);
-      Serial.println("✅ API key saved");
-    }
+    if (hS) preferences.putString("ssid", ssid);
+    if (hP) preferences.putString("enc_pwd", encPwd);
+    if (hU) preferences.putString("username", user);
+    if (hI) preferences.putString("imageName", img);
+    if (hR) preferences.putString("roomName",  room);
+    if (hK && key.length() >= 16 && key.length() <= 128) preferences.putString("api_key", key);
 
-    // configured=true якщо маємо і ssid, і enc_pwd
     String curSsid = preferences.getString("ssid", "");
     String curEnc  = preferences.getString("enc_pwd", "");
     bool cfgReady  = (curSsid.length() && curEnc.length());
@@ -394,190 +277,145 @@ class MyCallbacks : public BLECharacteristicCallbacks {
 
     bleConfigured = cfgReady;
 
-    // 4) Відповідь Android-у (chipId)
-    pChar->setValue(uniqueId.c_str());
-    pChar->notify();
-    Serial.println("📤 Надіслано chipId назад: " + uniqueId);
+    // notify chipId назад
+    c->setValue(uniqueId.c_str());
+    c->notify();
 
-    // 5) Якщо прийшли нові Wi-Fi дані → підключаємось одразу
-    if (hasSSID && hasPwd) {
-      String plainPwd = decryptPassword(encPwd);
-      if (plainPwd.length() > 0) {
-        Serial.println("🚀 Підключення з новими Wi-Fi даними без перезапуску");
+    // миттєве перепідключення Wi-Fi при оновленні даних
+    if (hS && hP) {
+      String plain = decryptPassword(encPwd);
+      if (plain.length()) {
         WiFi.mode(WIFI_STA);
         WiFi.disconnect(true, true);
         delay(200);
-        WiFi.begin(ssid.c_str(), plainPwd.c_str());
+        WiFi.begin(ssid.c_str(), plain.c_str());
       }
-      nextSyncAt = millis() + 5000;
+      nextSyncAt = millis() + 3000;
       return;
     }
-
-    // 6) Якщо конфіг вже готовий, але Wi-Fi ще не підключився
     if (cfgReady && WiFi.status() != WL_CONNECTED) {
       reconnectWithSavedWifi();
-      nextSyncAt = millis() + 5000;
+      nextSyncAt = millis() + 3000;
     }
   }
 };
 
-// Рестарт реклами після дисконекту (стабільність перепису характеристики)
 class MyServerCallbacks : public BLEServerCallbacks {
-  void onConnect(BLEServer* s) override {
-    Serial.println("BLE client connected");
-  }
-  void onDisconnect(BLEServer* s) override {
-    Serial.println("BLE client disconnected -> restart advertising");
-    s->startAdvertising();
-  }
+  void onDisconnect(BLEServer* s) override { s->startAdvertising(); }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SETUP
-// ─────────────────────────────────────────────────────────────────────────────
+// ────────────────────────── SETUP ──────────────────────────
 void setup() {
   Serial.begin(115200);
 
-  // Унікальний ChipId + BLE ім’я
+  // ChipId
   uint64_t chipid = ESP.getEfuseMac();
-  char id[13];
-  sprintf(id, "%04X%08X", (uint32_t)(chipid >> 32), (uint32_t)chipid);
+  char id[13]; sprintf(id, "%04X%08X", (uint32_t)(chipid >> 32), (uint32_t)chipid);
   uniqueId = String(id);
-  bleName = "ESP32_" + uniqueId;
+  bleName  = "ESP32_" + uniqueId;
 
-  // BLE init
+  // BLE
   BLEDevice::init(bleName.c_str());
-  Serial.println("=== BLE ІНІЦІАЛІЗАЦІЯ ===");
-  Serial.println("ChipId: " + uniqueId);
-  Serial.println("BLE Name: " + bleName);
   gServer = BLEDevice::createServer();
   gServer->setCallbacks(new MyServerCallbacks());
-  BLEService *pService = gServer->createService(SERVICE_UUID);
-
-  pCharacteristic = pService->createCharacteristic(
-    CHARACTERISTIC_UUID,
-    BLECharacteristic::PROPERTY_WRITE |
-    BLECharacteristic::PROPERTY_WRITE_NR |
-    BLECharacteristic::PROPERTY_NOTIFY
-  );
+  BLEService *svc = gServer->createService(SERVICE_UUID);
+  pCharacteristic = svc->createCharacteristic(
+      CHARACTERISTIC_UUID,
+      BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR | BLECharacteristic::PROPERTY_NOTIFY);
   pCharacteristic->setCallbacks(new MyCallbacks());
   pCharacteristic->addDescriptor(new BLE2902());
-  pService->start();
-
-  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
-  pAdvertising->addServiceUUID(SERVICE_UUID);
-  pAdvertising->setScanResponse(true);
-  pAdvertising->setMinPreferred(0x06);
+  svc->start();
+  BLEAdvertising *adv = BLEDevice::getAdvertising();
+  adv->addServiceUUID(SERVICE_UUID);
+  adv->setScanResponse(true);
+  adv->setMinPreferred(0x06);
   gServer->startAdvertising();
-  Serial.println("BLE advertising started!");
-  Serial.println("==========================");
+  BLESecurity *sec = new BLESecurity();
+  sec->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM_BOND);
+  sec->setCapability(ESP_IO_CAP_OUT);
+  sec->setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
 
-  // (опціонально) Secure Connections + Bonding
-  BLESecurity *pSecurity = new BLESecurity();
-  pSecurity->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM_BOND);
-  pSecurity->setCapability(ESP_IO_CAP_OUT);
-  pSecurity->setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
-
+  // NVS
   preferences.begin("config", true);
   bleConfigured = preferences.getBool("configured", false);
   preferences.end();
 
   // I2C/LCD/Sensors
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
-  lcd.init();
-  lcd.backlight();
-  lcd.setCursor(0, 0);
-  lcd.print(bleConfigured ? "Init sensors..." : "BLE config mode");
+  lcd.init(); lcd.backlight();
+  dht.begin(); pinMode(Smoke_PIN, INPUT); pinMode(Light_PIN, INPUT);
+  delay(20000); // MQ-2 прогрів
 
-  dht.begin();
-  pinMode(Smoke_PIN, INPUT);
-  pinMode(Light_PIN, INPUT);
+  if (!bmp.begin(0x76)) bmpDetected = false;
 
-  Serial.println("⏳ Прогрів MQ-2, зачекай 20 секунд...");
-  delay(20000);
-
-  if (!bmp.begin(0x76)) {
-    Serial.println("Помилка BMP280");
-    bmpDetected = false;
-  }
-
-  if (bleConfigured) scanAndConnectWiFi();
+  if (bleConfigured) reconnectWithSavedWifi();
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// LOOP
-// ─────────────────────────────────────────────────────────────────────────────
+// ────────────────────────── LOOP ──────────────────────────
 void loop() {
-  // 1) Підтримка Wi-Fi
   checkWiFiConnection();
 
-  // 2) Оновлення LCD
-  if (millis() - displayRefreshTime >= displayRefreshInterval) {
-    float tempC      = dht.readTemperature();
-    float humi       = dht.readHumidity();
-    int smokeState   = digitalRead(Smoke_PIN);
-    int lightState   = digitalRead(Light_PIN);
-    float pressure   = bmp.readPressure() / 100.0F; // hPa
-    updateDisplay(tempC, humi, smokeState, lightState, pressure);
+  if (millis() - displayRefreshTime >= LCD_REFRESH_MS) {
+    float t = dht.readTemperature();
+    float h = dht.readHumidity();
+    int   g = digitalRead(Smoke_PIN);
+    int   l = digitalRead(Light_PIN);
+    float p = bmp.readPressure() / 100.0F;
+    updateDisplay(t, h, g, l, p);
     displayRefreshTime = millis();
   }
 
-  // 3) Періодичний синк ownership
   if (WiFi.status() == WL_CONNECTED && bleConfigured && millis() >= nextSyncAt) {
-    int rc = syncOwnershipNoAuth();   // 1: оновлено, 0: без змін, -1: помилка
+    int rc = syncFromServer();   // 1 змінено, 0 без змін, -1 помилка
     scheduleNextSync(rc);
   }
 
-  // 4) Відправка телеметрії на сервер раз на 10 хв
-  if ((millis() - lastTime) > timerDelay && WiFi.status() == WL_CONNECTED && bleConfigured) {
-    float tempC      = dht.readTemperature();
-    float humi       = dht.readHumidity();
-    int smokeState   = digitalRead(Smoke_PIN);
-    int lightState   = digitalRead(Light_PIN);
+  if ((millis() - lastTime) > POST_PERIOD_MS && WiFi.status() == WL_CONNECTED && bleConfigured) {
+    // — зчитування
+    float tDht = dht.readTemperature();
+    float hDht = dht.readHumidity();
+    int   smokeState = digitalRead(Smoke_PIN);
+    int   lightState = digitalRead(Light_PIN);
 
-    float bmeTemp     = bmp.readTemperature();           // BMP → температура
-    float bmePressure = bmp.readPressure() / 100.0F;     // hPa
-    float bmeHumi     = NAN;                             // BMP не має вологості
-    float bmeAltitude = bmp.readAltitude(SEALEVELPRESSURE_HPA);
+    float tBmp = bmp.readTemperature();
+    float pBmp = bmp.readPressure() / 100.0F;
+    float aBmp = bmp.readAltitude(SEALEVELPRESSURE_HPA);
 
-    int   mq2AnalogValue   = analogRead(MQ2_ANALOG_PIN);
-    int   lightAnalogValue = analogRead(LIGHT_ANALOG_PIN);
-    float mq2Percent       = mq2AnalogValue   * 100.0 / 4095.0;
-    float lightPercent     = 100.0 - (lightAnalogValue * 100.0 / 4095.0);
+    int   mq2Raw  = analogRead(MQ2_ANALOG_PIN);
+    int   lightRaw= analogRead(LIGHT_ANALOG_PIN);
+    float mq2Pct  = mq2Raw   * 100.0 / 4095.0;
+    float lightPc = 100.0 - (lightRaw * 100.0 / 4095.0);
 
-    // JSON (ідентичний до 20x4; null, якщо даних нема)
+    // — формуємо JSON
     String json = "{";
     json += "\"ChipId\":\"" + uniqueId + "\",";
-    json += "\"TemperatureDht\":"; json += isnan(tempC) ? "null" : String(tempC, 2); json += ",";
-    json += "\"HumidityDht\":";    json += isnan(humi)  ? "null" : String(humi, 2) ; json += ",";
-    json += "\"TemperatureBme\":"; json += (!isnan(bmeTemp))     ? String(bmeTemp, 2)     : "null"; json += ",";
-    json += "\"HumidityBme\":";    json += "null,"; // BMP не має вологості
-    json += "\"Pressure\":";       json += (!isnan(bmePressure)) ? String(bmePressure, 2) : "null"; json += ",";
-    json += "\"Altitude\":";       json += (!isnan(bmeAltitude)) ? String(bmeAltitude, 2) : "null"; json += ",";
-    json += "\"GasDetected\":";    json += (smokeState == LOW ? "true" : "false"); json += ",";  // як у 20x4
-    json += "\"Light\":";          json += (lightState == LOW ? "true" : "false");   json += ","; // як у 20x4
-    json += "\"MQ2Analog\":"           + String(mq2AnalogValue)  + ",";
-    json += "\"MQ2AnalogPercent\":"    + String(mq2Percent, 2)   + ",";
-    json += "\"LightAnalog\":"         + String(lightAnalogValue)+ ",";
-    json += "\"LightAnalogPercent\":"  + String(lightPercent, 2);
+    json += "\"TemperatureDht\":"; json += isnan(tDht) ? "null" : String(tDht, 2); json += ",";
+    json += "\"HumidityDht\":";    json += isnan(hDht) ? "null" : String(hDht, 2); json += ",";
+    json += "\"TemperatureBme\":"; json += isnan(tBmp) ? "null" : String(tBmp, 2); json += ",";
+    json += "\"HumidityBme\":null,";
+    json += "\"Pressure\":";       json += isnan(pBmp) ? "null" : String(pBmp, 2); json += ",";
+    json += "\"Altitude\":";       json += isnan(aBmp) ? "null" : String(aBmp, 2); json += ",";
+    json += "\"GasDetected\":";    json += (smokeState == LOW ? "true" : "false"); json += ",";
+    json += "\"Light\":";          json += (lightState == LOW ? "true" : "false"); json += ",";
+    json += "\"MQ2Analog\":" + String(mq2Raw) + ",";
+    json += "\"MQ2AnalogPercent\":" + String(mq2Pct, 2) + ",";
+    json += "\"LightAnalog\":" + String(lightRaw) + ",";
+    json += "\"LightAnalogPercent\":" + String(lightPc, 2);
     json += "}";
 
-    HTTPClient http;
-    http.begin(serverName);
-    http.addHeader("Content-Type", "application/json");
+    // — POST /api/SensorData з X-Api-Key
+    String url = String(SERVER_BASE) + "/api/SensorData";
 
-    // дістаємо ключ і додаємо заголовок (як у 20x4)
     preferences.begin("config", true);
-    String apiKeyPost = preferences.getString("api_key", "");
+    String apiKey = preferences.getString("api_key", "");
     preferences.end();
-    if (apiKeyPost.length()) http.addHeader("X-Api-Key", apiKeyPost);
 
-    Serial.println("➡️ Надсилається JSON:");
-    Serial.println(json);
+    HTTPClient http;
+    http.begin(url);
+    http.addHeader("Content-Type", "application/json");
+    if (apiKey.length()) http.addHeader("X-Api-Key", apiKey);
 
     int code = http.POST(json);
-    if (code > 0) Serial.println("POST OK: " + String(code));
-    else          Serial.println("POST ERR: " + String(code));
     http.end();
 
     lastTime = millis();
